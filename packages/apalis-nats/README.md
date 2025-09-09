@@ -331,7 +331,7 @@ async fn long_job(job: MyJob, ctx: NatsContext) -> Result<(), Error> {
     Ok(())
 }
 
-// Or use a heartbeat guard (requires `tokio-comp` feature)
+// Or use a heartbeat guard
 async fn long_job_with_heartbeat(job: MyJob, ctx: NatsContext) -> Result<(), Error> {
     let _hb = ctx.start_progress_heartbeat(Duration::from_secs(15));
     // Do the long work; heartbeat will tick until `_hb` is dropped
@@ -350,6 +350,27 @@ let config = Config {
 Recommendations:
 - Set `ack_wait` to a value larger than your heartbeat interval (e.g., heartbeat every 15–30s, `ack_wait` 60–120s).
 - For very long jobs, keep heartbeats running until completion to avoid redelivery.
+
+### Auto-heartbeat Layer
+
+You can add a layer that automatically sends Progress acknowledgements while the handler runs. This keeps the message alive without calling `progress()` in the handler.
+
+```rust
+use apalis::prelude::*;
+use apalis_nats::{NatsStorage, ProgressHeartbeatLayer};
+use std::time::Duration;
+
+async fn do_work(job: MyJob) -> Result<(), Error> {
+    // No explicit progress calls
+    tokio::time::sleep(Duration::from_secs(45)).await;
+    Ok(())
+}
+
+let worker = WorkerBuilder::new("heavy-worker")
+    .option_layer(Some(ProgressHeartbeatLayer::new(Duration::from_secs(15))))
+    .backend(storage.clone())
+    .build_fn(do_work);
+```
 
 ## Requirements
 

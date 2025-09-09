@@ -199,7 +199,12 @@ pub struct NatsQueueInfo {
     pub pending: u64,
 }
 
-/// NATS storage implementation
+/// NATS JetStream storage implementation for Apalis jobs.
+///
+/// Use [`NatsStorage::new`] or [`NatsStorage::new_with_config`] to initialize the backend and
+/// create the required streams (one per priority and an optional DLQ stream).
+///
+/// See the crate-level docs and README for end-to-end examples.
 pub struct NatsStorage<T> {
     client: Client,
     pub(crate) jetstream: jetstream::Context,

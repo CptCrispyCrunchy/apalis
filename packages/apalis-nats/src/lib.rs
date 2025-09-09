@@ -5,44 +5,72 @@
     unreachable_pub
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
-//! apalis storage using NATS JetStream as a backend
+//! NATS JetStream storage for Apalis jobs.
+//! 
+//! - Priority queues (high/medium/low)
+//! - DLQ routing on abort errors or after max deliveries
+//! - At-least-once delivery, configurable retries with backoff
+//! - Optional OpenTelemetry W3C trace propagation
+//! - Long-running jobs: progress heartbeats to extend `ack_wait`
+//!
+//! Basic usage
 //! ```rust,no_run
 //! use apalis::prelude::*;
 //! use apalis_nats::NatsStorage;
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Debug, Clone, Deserialize, Serialize)]
-//! struct Email {
-//!     to: String,
-//! }
+//! struct Email { to: String }
 //!
 //! async fn send_email(job: Email) -> Result<(), Error> {
-//!     // Send the email
 //!     println!("Sending email to: {}", job.to);
 //!     Ok(())
 //! }
 //!
 //! #[tokio::main]
-//! async fn main() {
-//!     let nats_url = std::env::var("NATS_URL")
-//!         .unwrap_or_else(|_| "nats://localhost:4222".to_string());
-//!     let client = apalis_nats::connect(&nats_url).await.expect("Could not connect");
-//!     let mut storage = NatsStorage::new(client).await.expect("Could not create storage");
-//!     
-//!     // Push a job
-//!     let email = Email { to: "user@example.com".to_string() };
-//!     storage.push(email).await.expect("Could not push job");
-//!     
-//!     // Create and run worker
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let client = apalis_nats::connect("nats://localhost:4222").await?;
+//!     let storage = NatsStorage::new(client).await?;
+//!
+//!     storage.push(Email { to: "user@example.com".into() }).await?;
+//!
 //!     let worker = WorkerBuilder::new("email-worker")
 //!         .backend(storage.clone())
 //!         .build_fn(send_email);
 //!
-//!     Monitor::new()
-//!         .register(worker)
-//!         .run()
-//!         .await
-//!         .expect("Could not run monitor");
+//!     Monitor::new().register(worker).run().await?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! Long-running jobs (auto-heartbeat layer)
+//! ```rust,no_run
+//! use apalis::prelude::*;
+//! use apalis_nats::{NatsStorage, ProgressHeartbeatLayer, Config};
+//! use serde::{Deserialize, Serialize};
+//! use std::time::Duration;
+//!
+//! #[derive(Debug, Clone, Deserialize, Serialize)]
+//! struct Heavy { size: u64 }
+//!
+//! async fn do_work(job: Heavy) -> Result<(), Error> {
+//!     // Handler does not call progress() explicitly; the layer handles it.
+//!     tokio::time::sleep(Duration::from_secs(45)).await;
+//!     Ok(())
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let client = apalis_nats::connect("nats://localhost:4222").await?;
+//!     let storage = NatsStorage::new_with_config(client, Config { ack_wait: Duration::from_secs(60), ..Default::default() }).await?;
+//!
+//!     let worker = WorkerBuilder::new("heavy-worker")
+//!         .option_layer(Some(ProgressHeartbeatLayer::new(Duration::from_secs(15))))
+//!         .backend(storage.clone())
+//!         .build_fn(do_work);
+//!
+//!     Monitor::new().register(worker).run().await?;
+//!     Ok(())
 //! }
 //! ```
 
