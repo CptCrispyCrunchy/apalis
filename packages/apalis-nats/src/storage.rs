@@ -794,7 +794,6 @@ where
         let mut ack_storage = self.clone();
 
         // Spawn dedicated ack handling task
-        #[cfg(feature = "tokio-comp")]
         tokio::spawn(async move {
             while let Some((ctx, resp)) = ack_rx.next().await {
                 if let Err(e) = <NatsStorage<T> as Ack<T, Vec<u8>, JsonCodec<Vec<u8>>>>::ack(
@@ -810,7 +809,6 @@ where
         });
 
         // Spawn the fetch loop (no select!, no always-ready branch)
-        #[cfg(feature = "tokio-comp")]
         tokio::spawn(async move {
             loop {
                 let mut job_found = false;

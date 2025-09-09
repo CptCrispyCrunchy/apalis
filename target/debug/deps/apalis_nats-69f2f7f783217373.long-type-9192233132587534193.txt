@@ -1,1 +1,0 @@
-futures::future::IntoStream<Pin<Box<{async block@packages/apalis-nats/src/storage.rs:510:31: 510:41}>>>

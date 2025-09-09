@@ -25,7 +25,7 @@ chrono = { version = "0.4.42", default-features = false, features = [
     "serde",
 ] }
 futures = "0.3.31"
-tokio = { version = "1", features = ["rt", "net", "macros"], optional = true }
+tokio = { version = "1", features = ["rt", "net", "macros"] }
 thiserror = "2.0.16"
 async-trait = "0.1"
 bytes = "1.10"
@@ -46,6 +46,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.18", features = ["v4"] }
 
 [features]
-default = ["tokio-comp"]
-tokio-comp = ["tokio", "tokio/net"]
+default = []
 otel = ["opentelemetry", "opentelemetry-nats", "tracing-opentelemetry"]

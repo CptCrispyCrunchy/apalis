@@ -39,7 +39,7 @@ apalis-nats is a NATS JetStream backend implementation for the Apalis job proces
 - `futures`: Stream utilities
 - `tower`: Middleware support
 - `thiserror`: Error handling
-- Runtime: Tokio
+- Runtime: Tokio (required)
 - Optional: `opentelemetry`, `opentelemetry-nats`, `tracing-opentelemetry` for distributed tracing
 
 ## Development
@@ -174,6 +174,5 @@ Workers poll in priority order with brief sleep between checks to prevent CPU sp
 
 ## Feature Flags
 
-- `default`: Uses `tokio-comp`
-- `tokio-comp`: Tokio runtime support
+- `default`: Empty (no default features)
 - `otel`: OpenTelemetry tracing support

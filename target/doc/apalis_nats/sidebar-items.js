@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["NatsPollError","Priority"],"fn":["connect"],"struct":["Client","Config","NatsContext","NatsQueueInfo","NatsStorage"],"type":["ConnectError"]};

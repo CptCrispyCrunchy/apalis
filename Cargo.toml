@@ -72,7 +72,7 @@ all-features = true
 [dev-dependencies]
 criterion = { version = "0.7.0", features = ["async_tokio", "html_reports"] }
 pprof = { version = "0.15", features = ["flamegraph"] }
-paste = "1.0.14"
+paste = "1.0.15"
 serde = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 apalis = { path = ".", features = ["limit"] }
@@ -90,7 +90,7 @@ redis = { version = "0.32", default-features = false, features = [
 ] }
 
 [dev-dependencies.sqlx]
-version = "0.8.1"
+version = "0.8.6"
 default-features = false
 features = ["chrono", "mysql", "sqlite", "postgres", "runtime-tokio"]
 
@@ -134,17 +134,17 @@ members = [
 tower = { version = "0.5", features = ["util"], default-features = false }
 tracing-futures = { version = "0.2.5", optional = true, default-features = false }
 sentry-core = { version = "0.42.0", optional = true, default-features = false }
-metrics = { version = "0.24.0", optional = true, default-features = false }
+metrics = { version = "0.24.2", optional = true, default-features = false }
 metrics-exporter-prometheus = { version = "0.17", optional = true, default-features = false }
-thiserror = "2.0.0"
-futures = "0.3.30"
-pin-project-lite = "0.2.14"
+thiserror = "2.0.16"
+futures = "0.3.31"
+pin-project-lite = "0.2.16"
 # Needed only for sentry reporting
-uuid = { version = "1.8", optional = true }
+uuid = { version = "1.18", optional = true }
 ulid = { version = "1", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 
 [dependencies.tracing]
 default-features = false
-version = "0.1.40"
+version = "0.1.41"
 optional = true
