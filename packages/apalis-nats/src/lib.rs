@@ -43,6 +43,68 @@
 //! }
 //! ```
 //!
+//! Production Guide
+//! - Delivery semantics: at-least-once. Handlers should be idempotent.
+//! - Streams: one per priority plus optional DLQ, all under the same `namespace`.
+//! - Consumers: shared durable pull consumers per priority provide work-queue semantics.
+//! - Heartbeats: for jobs exceeding `ack_wait`, use `NatsContext::progress()` or `ProgressHeartbeatLayer`.
+//! - Tracing: logs use `tracing`; enable OpenTelemetry via the `otel` feature.
+//!
+//! Configuration Options (Config)
+//! - `namespace: String`
+//!   The logical prefix for streams/subjects, e.g., `my_app` creates streams `my_app_high|medium|low` and `my_app_dlq`.
+//! - `max_deliver: i64`
+//!   Max delivery attempts before routing to DLQ for transient failures. Typical: 3–10.
+//! - `ack_wait: Duration`
+//!   How long JetStream waits for an ack before redelivery. Must exceed your progress/heartbeat interval.
+//!   Typical: 60–120s for long-running jobs; shorter for fast jobs.
+//! - `num_replicas: usize`
+//!   Stream replicas for HA. Typical: 1 (dev), 3 (prod).
+//! - `enable_dlq: bool`
+//!   Whether to move failed jobs to `{namespace}.dlq` subject in the `{namespace}_dlq` stream.
+//! - `max_ack_pending: i64`
+//!   Limits unacked messages per consumer. Tune to match worker concurrency (e.g., 2–4x concurrency).
+//! - `fetch_expiry: Duration`
+//!   Client-side cap for a fetch on one priority before falling through to the next. Improves fairness and shutdown responsiveness.
+//!   Typical: 50–150ms.
+//! - `nak_backoff: Vec<Duration>`
+//!   Backoff schedule for transient errors (Nak with delay). The last value is reused once attempts exceed the list.
+//!   Typical: `[100ms, 200ms, 500ms, 1s, 2s, 5s]`.
+//! - `enable_tracing` (only with `otel` feature)
+//!   When true, inject/extract W3C trace context in NATS headers and link spans across producer/consumer.
+//!
+//! Recommended Starting Point
+//! ```rust
+//! # use std::time::Duration;
+//! # use apalis_nats::Config;
+//! let config = Config {
+//!     namespace: "my_app".into(),
+//!     max_deliver: 5,
+//!     ack_wait: Duration::from_secs(90),
+//!     num_replicas: 3,
+//!     enable_dlq: true,
+//!     max_ack_pending: 200,
+//!     fetch_expiry: Duration::from_millis(75),
+//!     nak_backoff: vec![
+//!         Duration::from_millis(100),
+//!         Duration::from_millis(200),
+//!         Duration::from_millis(500),
+//!         Duration::from_secs(1),
+//!         Duration::from_secs(2),
+//!         Duration::from_secs(5),
+//!     ],
+//!     #[cfg(feature = "otel")]
+//!     enable_tracing: true,
+//! };
+//! ```
+//!
+//! Operational Tips
+//! - Scale workers horizontally; consumers are shared and ensure one-delivery-per-message.
+//! - Use `.catch_panic()` so panics become `Error::Abort`, which are Term/DLQ’d deterministically.
+//! - Keep handlers idempotent; duplicates can occur (at-least-once).
+//! - Monitor JetStream metrics (ack pending, redeliveries, storage) and adjust `ack_wait`, `max_ack_pending`, and backoff.
+//! - For scheduling/delays, use an external scheduler or NATS KV with TTL; builtin scheduling isn’t implemented yet.
+//!
 //! Long-running jobs (auto-heartbeat layer)
 //! ```rust,no_run
 //! use apalis::prelude::*;
