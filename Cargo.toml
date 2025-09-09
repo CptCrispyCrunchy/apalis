@@ -127,6 +127,7 @@ members = [
   "examples/stepped-tasks",
   "examples/retries",
   "examples/nats",
+  "examples/nats-progress",
 ]
 
 

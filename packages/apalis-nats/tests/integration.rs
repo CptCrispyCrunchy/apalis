@@ -683,3 +683,93 @@ async fn test_dlq_on_abort_error() {
     handle.abort();
     let _ = handle.await;
 }
+
+#[tokio::test]
+async fn test_long_running_with_heartbeat_prevents_redelivery() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("apalis_nats=debug,apalis=info")
+        .try_init();
+
+    let (_container, client) = setup_nats_raw().await;
+
+    // Small ack_wait to force redelivery quickly if no progress
+    let mut config = Config::default();
+    config.namespace = format!(
+        "test_{}",
+        uuid::Uuid::new_v4().to_string().replace("-", "_")
+    );
+    config.ack_wait = Duration::from_secs(2);
+    config.max_deliver = 2;
+    config.enable_dlq = true;
+
+    let mut storage = NatsStorage::<TestJob>::new_with_config(client.clone(), config.clone())
+        .await
+        .expect("Failed to create storage");
+
+    // Record observed delivered counts during processing
+    let observed = Arc::new(Mutex::new(Vec::<u64>::new()));
+    let observed_clone = observed.clone();
+
+    async fn long_job_with_heartbeat(
+        job: TestJob,
+        ctx: apalis_nats::NatsContext,
+        observed: Data<Arc<Mutex<Vec<u64>>>>,
+    ) -> Result<(), Error> {
+        // Start heartbeat every 1s (< ack_wait)
+        let _hb = ctx.start_progress_heartbeat(Duration::from_secs(1));
+        // Run for ~5 seconds, sampling delivered count
+        for _ in 0..5 {
+            if let Some(msg) = ctx.message() {
+                if let Ok(info) = msg.info() {
+                    observed
+                        .lock()
+                        .await
+                        .push(u64::try_from(info.delivered).unwrap_or(u64::MAX));
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        // Finish successfully
+        Ok(())
+    }
+
+    // Push a job that would run longer than ack_wait
+    let job = TestJob::new("Long-running with heartbeat");
+    storage.push(job).await.expect("Failed to push job");
+
+    let worker = WorkerBuilder::new("heartbeat-long-job")
+        .concurrency(1)
+        .data(observed_clone)
+        .backend(storage.clone())
+        .build_fn(long_job_with_heartbeat);
+
+    // Run worker
+    let handle = tokio::spawn(async move {
+        worker.run().await;
+    });
+
+    // Wait long enough for the handler to finish
+    tokio::time::sleep(Duration::from_secs(7)).await;
+
+    // Check that delivered was never observed > 1 during processing
+    let obs = observed.lock().await.clone();
+    assert!(
+        !obs.iter().any(|&d| d > 1),
+        "Observed redelivery despite heartbeats: {:?}",
+        obs
+    );
+
+    // Ensure DLQ is empty for this namespace
+    let js = jetstream::new(client);
+    let dlq_stream_name = format!("{}_dlq", config.namespace);
+    if let Ok(mut stream) = js.get_stream(dlq_stream_name.clone()).await {
+        let info = stream.info().await.expect("failed to fetch dlq info");
+        assert_eq!(
+            info.state.messages, 0,
+            "No DLQ messages expected when heartbeat is active"
+        );
+    }
+
+    handle.abort();
+    let _ = handle.await;
+}

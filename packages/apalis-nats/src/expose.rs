@@ -2,10 +2,12 @@ use crate::{NatsContext, NatsStorage};
 use apalis_core::backend::{BackendExpose, Stat, WorkerState};
 use apalis_core::error::Error;
 use apalis_core::request::{Request, State};
+use apalis_core::service_fn::FromRequest;
 use apalis_core::worker::Worker;
 use async_nats::jetstream::{self, consumer};
 use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 
 impl<T> BackendExpose<Request<T, NatsContext>> for NatsStorage<T>
 where
@@ -137,5 +139,51 @@ impl NatsContext {
         } else {
             Ok(())
         }
+    }
+}
+
+/// A guard that periodically sends Progress acknowledgements to extend ack wait.
+/// Drop to stop heartbeating.
+#[derive(Debug)]
+pub struct ProgressGuard {
+    #[allow(dead_code)]
+    handle: tokio::task::JoinHandle<()>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for ProgressGuard {
+    fn drop(&mut self) {
+        // Best-effort stop signal; task may already be completed
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        // We intentionally don't await here
+    }
+}
+
+impl NatsContext {
+    /// Start a background heartbeat that periodically calls Progress to extend ack wait.
+    /// Returns None if no underlying message is present (e.g., synthetic requests).
+    pub fn start_progress_heartbeat(&self, interval: Duration) -> Option<ProgressGuard> {
+        let msg = self.message.as_ref()?.clone();
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                tokio::select! {
+                    _ = &mut rx => break,
+                    _ = ticker.tick() => {
+                        let _ = msg.ack_with(jetstream::AckKind::Progress).await;
+                    }
+                }
+            }
+        });
+        Some(ProgressGuard { handle, stop: Some(tx) })
+    }
+}
+
+impl<Req> FromRequest<Request<Req, NatsContext>> for NatsContext {
+    fn from_request(req: &Request<Req, NatsContext>) -> Result<Self, Error> {
+        Ok(req.parts.context.clone())
     }
 }

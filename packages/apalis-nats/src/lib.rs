@@ -47,6 +47,7 @@
 //! ```
 
 mod expose;
+mod layers;
 mod storage;
 
 pub use async_nats::{Client, ConnectError, ConnectOptions};
@@ -54,3 +55,4 @@ pub use storage::{
     connect, connect_with_credentials, connect_with_options, connect_with_user_pass, Config,
     NatsContext, NatsPollError, NatsQueueInfo, NatsStorage, Priority,
 };
+pub use crate::layers::ProgressHeartbeatLayer;

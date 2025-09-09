@@ -14,6 +14,7 @@ use apalis_core::worker::{Context as WorkerContext, Worker};
 use async_nats::jetstream::{self, consumer, stream};
 use async_nats::{Client, ConnectError, HeaderMap};
 use bytes::Bytes;
+use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc::{self, Sender};
 use futures::stream::BoxStream;
@@ -38,7 +39,7 @@ use tracing::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Priority levels for jobs
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum Priority {
     /// High priority jobs
     High,
@@ -79,6 +80,11 @@ pub struct Config {
     pub enable_dlq: bool,
     /// Maximum number of pending acknowledgments per consumer
     pub max_ack_pending: i64,
+    /// Maximum time to wait for a fetch on one priority before falling through
+    pub fetch_expiry: Duration,
+    /// Backoff schedule for transient failures (Nak delays by attempt index)
+    /// If shorter than delivered attempts, the last value is used for subsequent attempts.
+    pub nak_backoff: Vec<Duration>,
     /// Enable OpenTelemetry tracing
     #[cfg(feature = "otel")]
     pub enable_tracing: bool,
@@ -93,6 +99,15 @@ impl Default for Config {
             num_replicas: 1,
             enable_dlq: true,
             max_ack_pending: 100, // Allow up to 100 unacknowledged messages per consumer
+            fetch_expiry: Duration::from_millis(75),
+            nak_backoff: vec![
+                Duration::from_millis(100),
+                Duration::from_millis(200),
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(5),
+            ],
             #[cfg(feature = "otel")]
             enable_tracing: true,
         }
@@ -189,6 +204,11 @@ pub struct NatsStorage<T> {
     client: Client,
     pub(crate) jetstream: jetstream::Context,
     pub(crate) config: Config,
+    consumers: Arc<
+        std::sync::Mutex<
+            HashMap<Priority, consumer::Consumer<consumer::pull::Config>>,
+        >,
+    >,
     _phantom: PhantomData<T>,
 }
 
@@ -206,6 +226,7 @@ impl<T> Clone for NatsStorage<T> {
             client: self.client.clone(),
             jetstream: self.jetstream.clone(),
             config: self.config.clone(),
+            consumers: Arc::clone(&self.consumers),
             _phantom: PhantomData,
         }
     }
@@ -331,9 +352,9 @@ where
 
             // Create or update stream
             match jetstream.get_or_create_stream(stream_config).await {
-                Ok(_) => log::info!("Stream {} ready", stream_name),
+                Ok(_) => tracing::info!("Stream {} ready", stream_name),
                 Err(e) => {
-                    log::error!("Failed to create stream {}: {}", stream_name, e);
+                    tracing::error!("Failed to create stream {}: {}", stream_name, e);
                     return Err(NatsPollError::Nats(e.to_string()));
                 }
             }
@@ -354,9 +375,9 @@ where
             };
 
             match jetstream.get_or_create_stream(dlq_config).await {
-                Ok(_) => log::info!("DLQ stream {} ready", dlq_stream_name),
+                Ok(_) => tracing::info!("DLQ stream {} ready", dlq_stream_name),
                 Err(e) => {
-                    log::error!("Failed to create DLQ stream {}: {}", dlq_stream_name, e);
+                    tracing::error!("Failed to create DLQ stream {}: {}", dlq_stream_name, e);
                     return Err(NatsPollError::Nats(e.to_string()));
                 }
             }
@@ -366,6 +387,7 @@ where
             client,
             jetstream,
             config,
+            consumers: Arc::new(std::sync::Mutex::new(HashMap::new())),
             _phantom: PhantomData,
         })
     }
@@ -527,6 +549,17 @@ where
         &self,
         priority: Priority,
     ) -> Result<consumer::Consumer<consumer::pull::Config>, NatsPollError> {
+        // Try cache first
+        if let Some(existing) = self
+            .consumers
+            .lock()
+            .map_err(|_| NatsPollError::Storage("Consumer cache poisoned".into()))?
+            .get(&priority)
+            .cloned()
+        {
+            return Ok(existing);
+        }
+
         let stream_name = self.get_stream_name(priority);
         // Use a shared consumer name for all workers of the same priority
         // This ensures work queue semantics - each message delivered to only one worker
@@ -556,10 +589,18 @@ where
             .get_stream(stream_name)
             .await
             .map_err(|e| NatsPollError::Nats(e.to_string()))?;
-        stream
+        let consumer = stream
             .get_or_create_consumer(&consumer_name, config)
             .await
-            .map_err(|e| NatsPollError::Nats(e.to_string()))
+            .map_err(|e| NatsPollError::Nats(e.to_string()))?;
+
+        // Insert into cache and return a clone
+        let mut guard = self
+            .consumers
+            .lock()
+            .map_err(|_| NatsPollError::Storage("Consumer cache poisoned".into()))?;
+        guard.insert(priority, consumer.clone());
+        Ok(consumer)
     }
 }
 
@@ -681,7 +722,7 @@ where
                     msg.ack()
                         .await
                         .map_err(|e| NatsPollError::Nats(e.to_string()))?;
-                    log::debug!("Acknowledged message for task {}", response.task_id);
+                    tracing::debug!("Acknowledged message for task {}", response.task_id);
                 }
                 Err(e) => {
                     // Check if we should move to DLQ
@@ -730,7 +771,7 @@ where
                             .await
                             .map_err(|e| NatsPollError::Nats(e.to_string()))?;
 
-                        log::warn!(
+                        tracing::warn!(
                             "Moved task {} to DLQ after {} deliveries",
                             response.task_id,
                             info.delivered
@@ -743,28 +784,46 @@ where
                                 msg.ack_with(jetstream::AckKind::Term)
                                     .await
                                     .map_err(|e| NatsPollError::Nats(e.to_string()))?;
-                                log::warn!(
+                                tracing::warn!(
                                     "Terminated message for task {} due to abort error",
                                     response.task_id
                                 );
                             }
                             _ => {
-                                // Transient error - negative acknowledge for retry
-                                msg.ack_with(jetstream::AckKind::Nak(None))
+                                // Transient error - negative acknowledge for retry, with backoff
+                                let idx = info.delivered.saturating_sub(1) as usize;
+                                let delay = if self.config.nak_backoff.is_empty() {
+                                    None
+                                } else if idx < self.config.nak_backoff.len() {
+                                    Some(self.config.nak_backoff[idx])
+                                } else {
+                                    Some(*self.config.nak_backoff.last().unwrap())
+                                };
+
+                                msg.ack_with(jetstream::AckKind::Nak(delay))
                                     .await
                                     .map_err(|e| NatsPollError::Nats(e.to_string()))?;
-                                log::debug!(
-                                    "Nacked message for task {} for retry (attempt {})",
-                                    response.task_id,
-                                    info.delivered
-                                );
+                                if let Some(d) = delay {
+                                    tracing::debug!(
+                                        "Nacked message for task {} for retry in {:?} (attempt {})",
+                                        response.task_id,
+                                        d,
+                                        info.delivered
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        "Nacked message for task {} for retry (attempt {})",
+                                        response.task_id,
+                                        info.delivered
+                                    );
+                                }
                             }
                         }
                     }
                 }
             }
         } else {
-            log::warn!("No NATS message in context for task {}", response.task_id);
+            tracing::warn!("No NATS message in context for task {}", response.task_id);
         }
         Ok(())
     }
@@ -803,7 +862,7 @@ where
                 )
                 .await
                 {
-                    log::error!("Failed to acknowledge message: {}", e);
+                    tracing::error!("Failed to acknowledge message: {}", e);
                 }
             }
         });
@@ -817,30 +876,47 @@ where
                     // Use shared consumer for work queue semantics
                     if let Ok(consumer) = self.get_or_create_consumer(priority).await {
                         if let Ok(mut batch) = consumer.fetch().max_messages(1).messages().await {
-                            if let Ok(Some(msg)) = batch.try_next().await {
-                                match serde_json::from_slice::<NatsJob<T>>(&msg.payload) {
-                                    Ok(job) => {
-                                        let ctx = NatsContext::with_message(msg);
-                                        let request = Request::new_with_ctx(job.data, ctx);
-                                        // Send job to worker
-                                        if job_tx.send(Ok(Some(request))).await.is_err() {
-                                            return; // Channel closed, exit task
+                            // Apply client-side expiry to avoid blocking on empty queues
+                            match tokio::time::timeout(
+                                self.config.fetch_expiry,
+                                batch.try_next(),
+                            )
+                            .await
+                            {
+                                Ok(Ok(Some(msg))) => {
+                                    match serde_json::from_slice::<NatsJob<T>>(&msg.payload) {
+                                        Ok(job) => {
+                                            let ctx = NatsContext::with_message(msg);
+                                            let request = Request::new_with_ctx(job.data, ctx);
+                                            // Send job to worker
+                                            if job_tx.send(Ok(Some(request))).await.is_err() {
+                                                return; // Channel closed, exit task
+                                            }
+                                            job_found = true;
+                                            break; // Break the for loop to restart from high priority
                                         }
-                                        job_found = true;
-                                        break; // Break the for loop to restart from high priority
-                                    }
-                                    Err(e) => {
-                                        // Malformed payload: log and terminate to avoid endless redelivery
-                                        log::error!("Failed to deserialize job payload: {}", e);
-                                        if let Err(ack_err) =
-                                            msg.ack_with(jetstream::AckKind::Term).await
-                                        {
-                                            log::error!(
+                                        Err(e) => {
+                                            // Malformed payload: log and terminate to avoid endless redelivery
+                    tracing::error!("Failed to deserialize job payload: {}", e);
+                                            if let Err(ack_err) =
+                                                msg.ack_with(jetstream::AckKind::Term).await
+                                            {
+                                            tracing::error!(
                                                 "Failed to term malformed message: {}",
                                                 ack_err
                                             );
                                         }
+                                        }
                                     }
+                                }
+                                Ok(Ok(None)) => {
+                                    // No message in this batch
+                                }
+                                Ok(Err(e)) => {
+                                    tracing::debug!("Fetch error on priority {}: {}", priority, e);
+                                }
+                                Err(_elapsed) => {
+                                    // Timeout: fall through to next priority
                                 }
                             }
                         }

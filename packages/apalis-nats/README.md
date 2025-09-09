@@ -136,6 +136,15 @@ let config = Config {
     ack_wait: Duration::from_secs(30),     // Time to process job
     num_replicas: 3,                        // Stream replicas
     enable_dlq: true,                       // Enable dead letter queue
+    fetch_expiry: Duration::from_millis(75), // Max wait per priority fetch before falling through
+    nak_backoff: vec![                       // Delay schedule for transient failures
+        Duration::from_millis(100),
+        Duration::from_millis(200),
+        Duration::from_millis(500),
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(5),
+    ],
     #[cfg(feature = "otel")]
     enable_tracing: true,                   // Enable OpenTelemetry
 };
@@ -239,6 +248,11 @@ Notes:
 - The crate publishes to the DLQ first and only then acknowledges the original message. If publish fails, the original message is not acked and will redeliver, ensuring DLQ routing is retried.
 - If DLQ is disabled (`enable_dlq = false`), `Error::Abort(_)` results in a Term ack (no redelivery), while other errors use Nak for retry until `max_deliver`.
 
+## Fetch Expiry and Backoff
+
+- `fetch_expiry`: Caps how long a pull attempt waits on a given priority before the worker falls through to the next priority. This improves fairness, responsiveness, and shutdown behavior.
+- `nak_backoff`: Transient failures are retried with `Nak(Some(delay))` based on delivery attempt count. When the list is shorter than attempts, the last delay is reused. This reduces hot retry loops and smooths server load.
+
 ## Dead Letter Queue (DLQ) Message Format
 
 When jobs fail after maximum retries or encounter non-transient errors, they are moved to the DLQ with the following JSON structure:
@@ -294,6 +308,48 @@ If you need delayed job execution, consider these alternatives:
 3. **Application-Level Delay**: Handle delays in your job processing logic by checking timestamps and re-enqueueing if needed.
 
 Future versions may implement scheduling support using delayed subjects or JetStream timers, but this requires careful consideration of durability and failure scenarios.
+
+## Long-Running Tasks (Progress Heartbeats)
+
+JetStream redelivers messages if they are not acked within `ack_wait`. For tasks running longer than `ack_wait`, periodically send a Progress ack to extend the timer and prevent redelivery.
+
+Handler extraction of `NatsContext` is supported, so you can call `progress()` or start a background heartbeat:
+
+```rust
+use apalis::prelude::*;
+use apalis_nats::NatsContext;
+use std::time::Duration;
+
+// Periodic manual progress
+async fn long_job(job: MyJob, ctx: NatsContext) -> Result<(), Error> {
+    // Do work in chunks...
+    for _ in 0..100 {
+        // ... work ...
+        ctx.progress().await?; // extend ack_wait
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+    Ok(())
+}
+
+// Or use a heartbeat guard (requires `tokio-comp` feature)
+async fn long_job_with_heartbeat(job: MyJob, ctx: NatsContext) -> Result<(), Error> {
+    let _hb = ctx.start_progress_heartbeat(Duration::from_secs(15));
+    // Do the long work; heartbeat will tick until `_hb` is dropped
+    do_long_work(job).await?;
+    Ok(())
+}
+
+// Tune ack_wait and heartbeat interval
+let config = Config {
+    ack_wait: Duration::from_secs(60),  // e.g. 60s
+    // Heartbeat interval should be < ack_wait
+    ..Default::default()
+};
+```
+
+Recommendations:
+- Set `ack_wait` to a value larger than your heartbeat interval (e.g., heartbeat every 15–30s, `ack_wait` 60–120s).
+- For very long jobs, keep heartbeats running until completion to avoid redelivery.
 
 ## Requirements
 

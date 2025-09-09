@@ -367,7 +367,6 @@ dependencies = [
  "chrono",
  "email-service",
  "futures",
- "log",
  "opentelemetry",
  "opentelemetry-nats",
  "serde",
@@ -3056,6 +3055,20 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nats-progress-example"
+version = "0.1.0"
+dependencies = [
+ "apalis",
+ "apalis-nats",
+ "async-nats",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
