@@ -3040,6 +3040,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nats-catch-panic-example"
+version = "0.1.0"
+dependencies = [
+ "apalis",
+ "apalis-nats",
+ "async-nats",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "nats-example"
 version = "0.1.0"
 dependencies = [
@@ -3055,6 +3069,19 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "nats-priority-example"
+version = "0.1.0"
+dependencies = [
+ "apalis",
+ "apalis-nats",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

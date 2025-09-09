@@ -1,0 +1,14 @@
+[package]
+name = "nats-catch-panic-example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+apalis = { path = "../../", features = ["catch-panic", "limit"] }
+apalis-nats = { path = "../../packages/apalis-nats" }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-nats = "0.39"
+uuid = { version = "1.8", features = ["v4"] }

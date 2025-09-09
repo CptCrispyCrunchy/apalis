@@ -295,6 +295,23 @@ cargo test --package apalis-nats
 
 The tests use testcontainers to automatically spin up a NATS JetStream instance.
 
+## Examples
+
+Runnable examples are available under `examples/`:
+
+- `nats-progress`: Long-running jobs with manual `progress()` and auto-heartbeat layer, plus an optional panic demo.
+- `nats-priority`: Demonstrates High/Medium/Low priority queues and observed processing order.
+- `nats-catch-panic`: Shows `.catch_panic()` converting panics to `Error::Abort` so messages are Term/DLQ’d deterministically.
+
+Run with a local NATS server (with JetStream enabled):
+
+```bash
+docker run -p 4222:4222 -ti nats:2 -js
+NATS_URL=nats://localhost:4222 cargo run -p nats-progress-example
+NATS_URL=nats://localhost:4222 cargo run -p nats-priority-example
+NATS_URL=nats://localhost:4222 cargo run -p nats-catch-panic-example
+```
+
 ## Scheduling
 
 **Note:** Scheduled and delayed jobs are not currently supported in the NATS JetStream backend when using pull consumers. The `schedule_request` and `reschedule` methods will return an error indicating this limitation.

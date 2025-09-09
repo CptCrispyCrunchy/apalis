@@ -219,3 +219,99 @@ async fn on_nats_message(msg: Message) {
 ## 5. Conclusion
 
 This design provides a comprehensive blueprint for a high-performance, reliable, and observable job queue system using NATS and Rust. By leveraging separate streams for priorities, utilizing NATS JetStream's built-in reliability features, and integrating with `apalis` and OpenTelemetry, this architecture meets all the specified requirements. The separation of concerns between job streams, the DLQ, and priority handling ensures a scalable and maintainable system.│[2025-09-08][19:53:06][app_lib::email::commands][INFO] email_seed_mailbox: completed, inserted=200             │
+
+## 6. Practical Examples
+
+### 6.1 Priority Queues Example
+
+The snippet below enqueues Low, then Medium, then High priority messages and shows that a single-concurrency worker processes High first, then Medium, then Low.
+
+```rust
+use apalis::prelude::*;
+use apalis_nats::{Config, NatsStorage, Priority};
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Job { name: String }
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = apalis_nats::connect("nats://localhost:4222").await?;
+    let storage = NatsStorage::<Job>::new_with_config(
+        client,
+        Config { namespace: "nats_priority_demo".into(), ..Default::default() }
+    ).await?;
+
+    // Enqueue in reverse order to show priority wins
+    storage.push_with_priority(Job { name: "low-1".into() }, Priority::Low).await?;
+    storage.push_with_priority(Job { name: "low-2".into() }, Priority::Low).await?;
+    storage.push_with_priority(Job { name: "medium-1".into() }, Priority::Medium).await?;
+    storage.push_with_priority(Job { name: "medium-2".into() }, Priority::Medium).await?;
+    storage.push_with_priority(Job { name: "high-1".into() }, Priority::High).await?;
+    storage.push_with_priority(Job { name: "high-2".into() }, Priority::High).await?;
+
+    async fn handle(job: Job) -> Result<(), Error> {
+        println!("processing {}", job.name);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        Ok(())
+    }
+
+    let worker = WorkerBuilder::new("priority-worker")
+        .concurrency(1)
+        .backend(storage.clone())
+        .build_fn(handle);
+
+    Monitor::new().register(worker).run().await?;
+    Ok(())
+}
+```
+
+See also: `examples/nats-priority` for a runnable version.
+
+### 6.2 Catch-Panic Example
+
+Enable the `catch-panic` feature on `apalis` to convert panics into `Error::Abort` so the backend can Term/DLQ deterministically rather than redeliver.
+
+```toml
+# Cargo.toml
+[dependencies]
+apalis = { version = "0.7", features = ["catch-panic"] }
+apalis-nats = "0.7"
+```
+
+```rust
+use apalis::prelude::*;
+use apalis_nats::{Config, NatsStorage};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Job { name: String, panic: bool }
+
+async fn handler(job: Job) -> Result<(), Error> {
+    if job.panic { panic!("boom"); }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = apalis_nats::connect("nats://localhost:4222").await?;
+    let storage = NatsStorage::new_with_config(
+        client,
+        Config { enable_dlq: true, ..Default::default() }
+    ).await?;
+
+    storage.push(Job { name: "ok".into(), panic: false }).await?;
+    storage.push(Job { name: "will-panic".into(), panic: true }).await?;
+
+    let worker = WorkerBuilder::new("catch-panic-worker")
+        .catch_panic()
+        .backend(storage.clone())
+        .build_fn(handler);
+
+    Monitor::new().register(worker).run().await?;
+    Ok(())
+}
+```
+
+See also: `examples/nats-catch-panic` for a runnable version that inspects the DLQ after execution.
