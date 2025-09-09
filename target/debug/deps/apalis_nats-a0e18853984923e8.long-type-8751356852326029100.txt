@@ -1,0 +1,1 @@
+futures::future::IntoStream<Pin<Box<dyn futures::Future<Output = Pin<Box<dyn futures::Stream<Item = Result<std::option::Option<apalis_core::request::Request<T, NatsContext>>, _>> + std::marker::Send>>> + std::marker::Send>>>

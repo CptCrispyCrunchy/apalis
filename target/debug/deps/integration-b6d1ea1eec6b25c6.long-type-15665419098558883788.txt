@@ -1,0 +1,3 @@
+ServiceFn<fn(TestJob, apalis::prelude::Data<Arc<AtomicUsize>>, apalis::prelude::Context) -> impl std::future::Future<Output = Result<(), apalis::prelude::Error>> {failing_job}, TestJob, NatsContext, _>
+ServiceFn<fn(TestJob, apalis::prelude::Data<Arc<AtomicUsize>>, apalis::prelude::Context) -> impl std::future::Future<Output = Result<(), apalis::prelude::Error>> {failing_job}, TestJob, NatsContext, _>: tower_service::Service<apalis::prelude::Request<TestJob, NatsContext>>
+AddExtension<ServiceFn<fn(TestJob, apalis::prelude::Data<Arc<AtomicUsize>>, apalis::prelude::Context) -> impl std::future::Future<Output = Result<(), apalis::prelude::Error>> {failing_job}, TestJob, NatsContext, _>, Arc<AtomicUsize>>
