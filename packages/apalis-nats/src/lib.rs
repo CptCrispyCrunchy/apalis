@@ -43,6 +43,65 @@
 //! }
 //! ```
 //!
+//! Priorities
+//! ```rust,no_run
+//! use apalis::prelude::*;
+//! use apalis_nats::{NatsStorage, Priority};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Debug, Clone, Deserialize, Serialize)]
+//! struct Job { name: String }
+//!
+//! async fn handle(job: Job) -> Result<(), Error> {
+//!     println!("processing {}", job.name);
+//!     Ok(())
+//! }
+//!
+//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = apalis_nats::connect("nats://localhost:4222").await?;
+//! let storage = NatsStorage::<Job>::new(client).await?;
+//!
+//! // Enqueue with explicit priority
+//! storage.push_with_priority(Job { name: "high".into() }, Priority::High).await?;
+//! storage.push_with_priority(Job { name: "medium".into() }, Priority::Medium).await?;
+//! storage.push_with_priority(Job { name: "low".into() }, Priority::Low).await?;
+//!
+//! let worker = WorkerBuilder::new("priority-worker")
+//!     .concurrency(1)
+//!     .backend(storage.clone())
+//!     .build_fn(handle);
+//!
+//! Monitor::new().register(worker).run().await?;
+//! # Ok(()) }
+//! ```
+//!
+//! Catch Panics (Abort → DLQ/Term)
+//! ```rust,no_run
+//! use apalis::prelude::*;
+//! use apalis_nats::NatsStorage;
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Debug, Clone, Deserialize, Serialize)]
+//! struct Job { panic: bool }
+//!
+//! async fn handler(job: Job) -> Result<(), Error> {
+//!     if job.panic { panic!("boom"); }
+//!     Ok(())
+//! }
+//!
+//! # async fn demo2() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = apalis_nats::connect("nats://localhost:4222").await?;
+//! let storage = NatsStorage::<Job>::new(client).await?;
+//!
+//! let worker = WorkerBuilder::new("panic-aware")
+//!     .catch_panic() // requires `apalis` feature `catch-panic`
+//!     .backend(storage.clone())
+//!     .build_fn(handler);
+//!
+//! Monitor::new().register(worker).run().await?;
+//! # Ok(()) }
+//! ```
+//!
 //! Production Guide
 //! - Delivery semantics: at-least-once. Handlers should be idempotent.
 //! - Streams: one per priority plus optional DLQ, all under the same `namespace`.
