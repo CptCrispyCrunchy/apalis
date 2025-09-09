@@ -17,7 +17,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc::{self, Sender};
 use futures::stream::BoxStream;
-use futures::{select, FutureExt, SinkExt, StreamExt, TryStreamExt};
+use futures::{SinkExt, StreamExt, TryStreamExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::json;
 use std::fmt;
@@ -27,7 +27,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 #[cfg(feature = "otel")]
-use opentelemetry::trace::{SpanKind, Status, TraceContextExt, Tracer};
+use opentelemetry::trace::{Span as OtelSpan, SpanKind, Status, Tracer};
 #[cfg(feature = "otel")]
 use opentelemetry::{global, Context as OtelContext, KeyValue};
 #[cfg(feature = "otel")]
@@ -79,8 +79,6 @@ pub struct Config {
     pub enable_dlq: bool,
     /// Maximum number of pending acknowledgments per consumer
     pub max_ack_pending: i64,
-    /// Enable flow control for consumers
-    pub flow_control: bool,
     /// Enable OpenTelemetry tracing
     #[cfg(feature = "otel")]
     pub enable_tracing: bool,
@@ -95,7 +93,6 @@ impl Default for Config {
             num_replicas: 1,
             enable_dlq: true,
             max_ack_pending: 100, // Allow up to 100 unacknowledged messages per consumer
-            flow_control: true,    // Enable flow control by default
             #[cfg(feature = "otel")]
             enable_tracing: true,
         }
@@ -149,15 +146,17 @@ impl NatsContext {
         {
             // Extract trace context from message headers
             let trace_context = global::get_text_map_propagator(|propagator| {
-                propagator.extract(&NatsHeaderExtractor::new(message.headers.as_ref().unwrap_or(&HeaderMap::new())))
+                propagator.extract(&NatsHeaderExtractor::new(
+                    message.headers.as_ref().unwrap_or(&HeaderMap::new()),
+                ))
             });
-            
+
             Self {
                 message: Some(Arc::new(message)),
                 trace_context: Some(trace_context),
             }
         }
-        
+
         #[cfg(not(feature = "otel"))]
         Self {
             message: Some(Arc::new(message)),
@@ -186,7 +185,6 @@ pub struct NatsQueueInfo {
 }
 
 /// NATS storage implementation
-#[derive(Clone)]
 pub struct NatsStorage<T> {
     client: Client,
     pub(crate) jetstream: jetstream::Context,
@@ -202,10 +200,21 @@ impl<T> fmt::Debug for NatsStorage<T> {
     }
 }
 
+impl<T> Clone for NatsStorage<T> {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            jetstream: self.jetstream.clone(),
+            config: self.config.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 /// Connect to NATS with basic URL
-/// 
+///
 /// For simple connections without authentication.
-/// 
+///
 /// # Example
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -218,9 +227,9 @@ pub async fn connect(url: impl async_nats::ToServerAddrs) -> Result<Client, Conn
 }
 
 /// Connect to NATS with credentials file
-/// 
+///
 /// Authenticates using a `.creds` file containing JWT and NKey seed.
-/// 
+///
 /// # Example
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -232,8 +241,8 @@ pub async fn connect(url: impl async_nats::ToServerAddrs) -> Result<Client, Conn
 /// # }
 /// ```
 pub async fn connect_with_credentials(
-    url: impl async_nats::ToServerAddrs, 
-    creds_path: impl AsRef<std::path::Path>
+    url: impl async_nats::ToServerAddrs,
+    creds_path: impl AsRef<std::path::Path>,
 ) -> Result<Client, ConnectError> {
     async_nats::ConnectOptions::with_credentials_file(creds_path.as_ref())
         .await?
@@ -242,7 +251,7 @@ pub async fn connect_with_credentials(
 }
 
 /// Connect to NATS with username and password
-/// 
+///
 /// # Example
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -265,10 +274,10 @@ pub async fn connect_with_user_pass(
 }
 
 /// Connect to NATS with custom options
-/// 
+///
 /// Provides full control over connection configuration including authentication,
 /// client name, and other advanced options.
-/// 
+///
 /// # Example
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -372,10 +381,10 @@ where
     }
 
     /// Push a job with a specific priority
-    /// 
+    ///
     /// Jobs are published to priority-specific streams and will be processed
     /// in priority order (High -> Medium -> Low).
-    /// 
+    ///
     /// # Example
     /// ```no_run
     /// # use apalis_nats::{NatsStorage, Priority};
@@ -390,7 +399,7 @@ where
         priority: Priority,
     ) -> Result<TaskId, NatsPollError> {
         #[cfg(feature = "otel")]
-        let _span = if self.config.enable_tracing {
+        let mut _span = if self.config.enable_tracing {
             let tracer = global::tracer("apalis-nats");
             let span = tracer
                 .span_builder("job.push")
@@ -419,15 +428,16 @@ where
         let subject = self.get_subject(priority);
 
         // Prepare headers with OpenTelemetry trace context
-        let headers = HeaderMap::new();
-        
+        let mut headers = HeaderMap::new();
+
         #[cfg(feature = "otel")]
         if self.config.enable_tracing {
             // Inject current trace context into headers
             let cx = Span::current().context();
             global::get_text_map_propagator(|propagator| {
-                let mut injector = NatsHeaderInjector::new(&mut headers);
+                let mut injector = NatsHeaderInjector::new(headers.clone());
                 propagator.inject_context(&cx, &mut injector);
+                headers = injector.into();
             });
         }
 
@@ -440,7 +450,8 @@ where
             .map_err(|e| NatsPollError::Nats(e.to_string()))?;
 
         #[cfg(feature = "otel")]
-        if let Some(ref span) = _span {
+        if let Some(ref mut span) = _span {
+            use OtelSpan;
             span.set_attribute(KeyValue::new("job.id", task_id.to_string()));
             span.set_status(Status::Ok);
         }
@@ -449,11 +460,11 @@ where
     }
 
     /// Push a job with a specific priority and trace context
-    /// 
+    ///
     /// This method allows manual specification of the OpenTelemetry trace context
     /// that will be propagated to the job consumer. This is useful when you need
     /// to link job processing to a specific trace.
-    /// 
+    ///
     /// Only available when the `otel` feature is enabled.
     #[cfg(feature = "otel")]
     pub async fn push_with_priority_and_context(
@@ -463,7 +474,7 @@ where
         context: &OtelContext,
     ) -> Result<TaskId, NatsPollError> {
         let tracer = global::tracer("apalis-nats");
-        let span = tracer
+        let mut span = tracer
             .span_builder("job.push")
             .with_kind(SpanKind::Producer)
             .with_attributes(vec![
@@ -487,11 +498,12 @@ where
 
         // Prepare headers with provided trace context
         let mut headers = HeaderMap::new();
-        
+
         if self.config.enable_tracing {
             global::get_text_map_propagator(|propagator| {
-                let mut injector = NatsHeaderInjector::new(&mut headers);
+                let mut injector = NatsHeaderInjector::new(headers.clone());
                 propagator.inject_context(context, &mut injector);
+                headers = injector.into();
             });
         }
 
@@ -503,6 +515,7 @@ where
             .await
             .map_err(|e| NatsPollError::Nats(e.to_string()))?;
 
+        use OtelSpan;
         span.set_attribute(KeyValue::new("job.id", task_id.to_string()));
         span.set_status(Status::Ok);
 
@@ -529,7 +542,7 @@ where
             filter_subject: self.get_subject(priority),
             // Critical for work queue behavior - only deliver to one consumer
             deliver_policy: consumer::DeliverPolicy::All,
-            // Control message delivery  
+            // Control message delivery
             max_ack_pending: self.config.max_ack_pending,
             // Replay policy - start from beginning or new messages only
             replay_policy: consumer::ReplayPolicy::Instant,
@@ -538,9 +551,14 @@ where
             ..Default::default()
         };
 
-        let stream = self.jetstream.get_stream(stream_name).await
+        let stream = self
+            .jetstream
+            .get_stream(stream_name)
+            .await
             .map_err(|e| NatsPollError::Nats(e.to_string()))?;
-        stream.get_or_create_consumer(&consumer_name, config).await
+        stream
+            .get_or_create_consumer(&consumer_name, config)
+            .await
             .map_err(|e| NatsPollError::Nats(e.to_string()))
     }
 }
@@ -558,7 +576,9 @@ where
         &mut self,
         req: Request<Self::Job, Self::Context>,
     ) -> Result<Parts<Self::Context>, Self::Error> {
-        let task_id = self.push_with_priority(req.args, Priority::default()).await?;
+        let task_id = self
+            .push_with_priority(req.args, Priority::default())
+            .await?;
         let mut parts = Parts::default();
         parts.task_id = task_id;
         parts.context = NatsContext::default();
@@ -571,7 +591,9 @@ where
         _req: Request<Self::Compact, Self::Context>,
     ) -> Result<Parts<Self::Context>, Self::Error> {
         // For now, we don't support raw requests directly
-        Err(NatsPollError::Storage("Raw requests not supported".to_string()))
+        Err(NatsPollError::Storage(
+            "Raw requests not supported".to_string(),
+        ))
     }
 
     async fn schedule_request(
@@ -580,12 +602,14 @@ where
         _on: i64,
     ) -> Result<Parts<Self::Context>, Self::Error> {
         // Scheduling is not yet implemented for NATS
-        Err(NatsPollError::Storage("Scheduling not yet implemented".to_string()))
+        Err(NatsPollError::Storage(
+            "Scheduling not yet implemented".to_string(),
+        ))
     }
 
     async fn len(&mut self) -> Result<i64, Self::Error> {
         let mut total = 0u64;
-        
+
         for priority in [Priority::High, Priority::Medium, Priority::Low] {
             let stream_name = self.get_stream_name(priority);
             match self.jetstream.get_stream(stream_name).await {
@@ -597,7 +621,7 @@ where
                 Err(_) => continue,
             }
         }
-        
+
         Ok(total as i64)
     }
 
@@ -609,10 +633,7 @@ where
         Ok(None)
     }
 
-    async fn update(
-        &mut self,
-        _job: Request<Self::Job, Self::Context>,
-    ) -> Result<(), Self::Error> {
+    async fn update(&mut self, _job: Request<Self::Job, Self::Context>) -> Result<(), Self::Error> {
         // NATS streams don't support in-place updates
         Err(NatsPollError::Storage("Updates not supported".to_string()))
     }
@@ -623,7 +644,9 @@ where
         _wait: Duration,
     ) -> Result<(), Self::Error> {
         // Rescheduling would require republishing to the stream
-        Err(NatsPollError::Storage("Rescheduling not yet implemented".to_string()))
+        Err(NatsPollError::Storage(
+            "Rescheduling not yet implemented".to_string(),
+        ))
     }
 
     async fn is_empty(&mut self) -> Result<bool, Self::Error> {
@@ -645,7 +668,11 @@ where
     type Context = NatsContext;
     type AckError = NatsPollError;
 
-    async fn ack(&mut self, ctx: &Self::Context, response: &Response<Res>) -> Result<(), Self::AckError> {
+    async fn ack(
+        &mut self,
+        ctx: &Self::Context,
+        response: &Response<Res>,
+    ) -> Result<(), Self::AckError> {
         // Get the NATS message from context
         if let Some(msg) = ctx.message() {
             match &response.inner {
@@ -670,7 +697,13 @@ where
                     if should_dlq && self.config.enable_dlq {
                         // Move to DLQ by publishing to DLQ stream
                         let dlq_subject = format!("{}.dlq", self.config.namespace);
-                        
+
+                        // Determine DLQ reason
+                        let dlq_reason = match e {
+                            Error::Abort(_) => "abort_error",
+                            _ => "max_deliver_exceeded",
+                        };
+
                         // Create DLQ message with metadata
                         let dlq_job = json!({
                             "original_task_id": response.task_id.to_string(),
@@ -678,23 +711,30 @@ where
                             "attempts": format!("{:?}", response.attempt),
                             "delivered_count": info.delivered,
                             "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "dlq_reason": dlq_reason,
                             "payload": msg.payload.clone(),
                         });
-                        
+
                         // Publish to DLQ
+                        let body = serde_json::to_vec(&dlq_job)
+                            .map_err(|e| NatsPollError::Serialization(e))?;
                         self.jetstream
-                            .publish(dlq_subject, serde_json::to_vec(&dlq_job).unwrap().into())
+                            .publish(dlq_subject, body.into())
                             .await
                             .map_err(|e| NatsPollError::Nats(e.to_string()))?
                             .await
                             .map_err(|e| NatsPollError::Nats(e.to_string()))?;
-                        
+
                         // Acknowledge the original message to remove it
                         msg.ack()
                             .await
                             .map_err(|e| NatsPollError::Nats(e.to_string()))?;
-                        
-                        log::warn!("Moved task {} to DLQ after {} deliveries", response.task_id, info.delivered);
+
+                        log::warn!(
+                            "Moved task {} to DLQ after {} deliveries",
+                            response.task_id,
+                            info.delivered
+                        );
                     } else {
                         // Check error type to determine acknowledgment strategy
                         match e {
@@ -703,14 +743,21 @@ where
                                 msg.ack_with(jetstream::AckKind::Term)
                                     .await
                                     .map_err(|e| NatsPollError::Nats(e.to_string()))?;
-                                log::warn!("Terminated message for task {} due to abort error", response.task_id);
+                                log::warn!(
+                                    "Terminated message for task {} due to abort error",
+                                    response.task_id
+                                );
                             }
                             _ => {
                                 // Transient error - negative acknowledge for retry
                                 msg.ack_with(jetstream::AckKind::Nak(None))
                                     .await
                                     .map_err(|e| NatsPollError::Nats(e.to_string()))?;
-                                log::debug!("Nacked message for task {} for retry (attempt {})", response.task_id, info.delivered);
+                                log::debug!(
+                                    "Nacked message for task {} for retry (attempt {})",
+                                    response.task_id,
+                                    info.delivered
+                                );
                             }
                         }
                     }
@@ -728,69 +775,87 @@ where
     T: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     type Stream = BoxStream<'static, Result<Option<Request<T, NatsContext>>, Error>>;
-    type Layer = AckLayer<Sender<(NatsContext, Response<Vec<u8>>)>, T, NatsContext, JsonCodec<Vec<u8>>>;
+    type Layer =
+        AckLayer<Sender<(NatsContext, Response<Vec<u8>>)>, T, NatsContext, JsonCodec<Vec<u8>>>;
     type Codec = JsonCodec<Vec<u8>>;
 
-    fn poll(mut self, worker: &Worker<WorkerContext>) -> Poller<Self::Stream, Self::Layer> {
+    fn poll(self, worker: &Worker<WorkerContext>) -> Poller<Self::Stream, Self::Layer> {
         let _worker_id = worker.id().to_string();
-        
+
         // Create channels for job streaming and acknowledgments
-        let (mut job_tx, job_rx) = mpsc::channel::<Result<Option<Request<T, NatsContext>>, Error>>(10);
+        let (mut job_tx, job_rx) =
+            mpsc::channel::<Result<Option<Request<T, NatsContext>>, Error>>(10);
         let (ack_tx, mut ack_rx) = mpsc::channel::<(NatsContext, Response<Vec<u8>>)>(10);
-        
+
         // Create the AckLayer with the sender
         let layer = AckLayer::new(ack_tx);
-        
-        // Spawn the polling task that handles both job fetching and acknowledgments
+
+        // Clone storage for the ack task
+        let mut ack_storage = self.clone();
+
+        // Spawn dedicated ack handling task
+        #[cfg(feature = "tokio-comp")]
+        tokio::spawn(async move {
+            while let Some((ctx, resp)) = ack_rx.next().await {
+                if let Err(e) = <NatsStorage<T> as Ack<T, Vec<u8>, JsonCodec<Vec<u8>>>>::ack(
+                    &mut ack_storage,
+                    &ctx,
+                    &resp,
+                )
+                .await
+                {
+                    log::error!("Failed to acknowledge message: {}", e);
+                }
+            }
+        });
+
+        // Spawn the fetch loop (no select!, no always-ready branch)
+        #[cfg(feature = "tokio-comp")]
         tokio::spawn(async move {
             loop {
-                select! {
-                    // Try to fetch new jobs
-                    _ = async {}.fuse() => {
-                        let mut job_found = false;
-                        // Try to fetch a job from each priority level in order
-                        for priority in [Priority::High, Priority::Medium, Priority::Low] {
-                            // Use shared consumer for work queue semantics
-                            if let Ok(consumer) = self.get_or_create_consumer(priority).await {
-                                if let Ok(mut batch) = consumer.fetch().max_messages(1).messages().await {
-                                    if let Ok(Some(msg)) = batch.try_next().await {
-                                        if let Ok(job) = serde_json::from_slice::<NatsJob<T>>(&msg.payload) {
-                                            let ctx = NatsContext::with_message(msg);
-                                            let request = Request::new_with_ctx(job.data, ctx);
-                                            // Send job to worker
-                                            if job_tx.send(Ok(Some(request))).await.is_err() {
-                                                return; // Channel closed, exit task
-                                            }
-                                            job_found = true;
-                                            break; // Break the for loop to restart from high priority
+                let mut job_found = false;
+                // Try to fetch a job from each priority level in order
+                for priority in [Priority::High, Priority::Medium, Priority::Low] {
+                    // Use shared consumer for work queue semantics
+                    if let Ok(consumer) = self.get_or_create_consumer(priority).await {
+                        if let Ok(mut batch) = consumer.fetch().max_messages(1).messages().await {
+                            if let Ok(Some(msg)) = batch.try_next().await {
+                                match serde_json::from_slice::<NatsJob<T>>(&msg.payload) {
+                                    Ok(job) => {
+                                        let ctx = NatsContext::with_message(msg);
+                                        let request = Request::new_with_ctx(job.data, ctx);
+                                        // Send job to worker
+                                        if job_tx.send(Ok(Some(request))).await.is_err() {
+                                            return; // Channel closed, exit task
+                                        }
+                                        job_found = true;
+                                        break; // Break the for loop to restart from high priority
+                                    }
+                                    Err(e) => {
+                                        // Malformed payload: log and terminate to avoid endless redelivery
+                                        log::error!("Failed to deserialize job payload: {}", e);
+                                        if let Err(ack_err) =
+                                            msg.ack_with(jetstream::AckKind::Term).await
+                                        {
+                                            log::error!(
+                                                "Failed to term malformed message: {}",
+                                                ack_err
+                                            );
                                         }
                                     }
                                 }
                             }
                         }
-                        
-                        // Wait based on whether we found a job
-                        if job_found {
-                            // Short wait when actively processing
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        } else {
-                            // Longer wait when no jobs available
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
                     }
-                    
-                    // Handle acknowledgment requests
-                    ack_request = ack_rx.next() => {
-                        if let Some((ctx, response)) = ack_request {
-                            // Call the Ack implementation with explicit type
-                            if let Err(e) = <NatsStorage<T> as Ack<T, Vec<u8>, JsonCodec<Vec<u8>>>>::ack(&mut self, &ctx, &response).await {
-                                log::error!("Failed to acknowledge message: {}", e);
-                            }
-                        } else {
-                            // Channel closed, exit
-                            break;
-                        }
-                    }
+                }
+
+                // Apply backoff based on whether we found a job
+                if job_found {
+                    // Short wait when actively processing
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                } else {
+                    // Longer wait when no jobs available
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         });
@@ -805,7 +870,7 @@ where
                     tokio::time::sleep(Duration::from_secs(30)).await;
                 }
             },
-            layer
+            layer,
         )
     }
 }

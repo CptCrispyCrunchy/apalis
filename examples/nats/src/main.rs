@@ -3,13 +3,15 @@ use apalis_nats::{Config, NatsStorage, Priority};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::{error, info, instrument};
+use tracing::{info, instrument};
 
 // OpenTelemetry imports for tracing example
 #[cfg(feature = "otel")]
 use opentelemetry::global;
 #[cfg(feature = "otel")]
 use opentelemetry::trace::{TraceContextExt, Tracer};
+#[cfg(feature = "otel")]
+use opentelemetry::KeyValue;
 #[cfg(feature = "otel")]
 use opentelemetry_otlp::WithExportConfig;
 #[cfg(feature = "otel")]
@@ -18,8 +20,6 @@ use opentelemetry_sdk::{
     trace::{self, RandomIdGenerator, Sampler},
     Resource,
 };
-#[cfg(feature = "otel")]
-use opentelemetry::KeyValue;
 #[cfg(feature = "otel")]
 use tracing_opentelemetry::OpenTelemetryLayer;
 #[cfg(feature = "otel")]
@@ -33,16 +33,16 @@ struct Email {
     created_at: DateTime<Utc>,
 }
 
-#[instrument(skip(email, _ctx), fields(email.to = %email.to, email.subject = %email.subject))]
-async fn send_email(email: Email, _ctx: JobContext) -> Result<(), Error> {
+#[instrument(skip(email), fields(email.to = %email.to, email.subject = %email.subject))]
+async fn send_email(email: Email) -> Result<(), Error> {
     info!(
         "📧 Sending email to: {}, subject: {}",
         email.to, email.subject
     );
-    
+
     // Simulate email sending
     tokio::time::sleep(Duration::from_secs(1)).await;
-    
+
     // Access trace context if available
     #[cfg(feature = "otel")]
     if let Some(nats_ctx) = _ctx.data_opt::<apalis_nats::NatsContext>() {
@@ -51,7 +51,7 @@ async fn send_email(email: Email, _ctx: JobContext) -> Result<(), Error> {
             // The span is automatically linked to the parent context
         }
     }
-    
+
     info!("✅ Email sent successfully to: {}", email.to);
     Ok(())
 }
@@ -68,7 +68,7 @@ async fn produce_jobs(storage: &NatsStorage<Email>) -> Result<(), Box<dyn std::e
             body: "This is a high priority message".to_string(),
             created_at: Utc::now(),
         };
-        
+
         let task_id = storage.push_with_priority(email, Priority::High).await?;
         info!("  📤 High priority job queued: {}", task_id);
     }
@@ -81,7 +81,7 @@ async fn produce_jobs(storage: &NatsStorage<Email>) -> Result<(), Box<dyn std::e
             body: "This is a medium priority message".to_string(),
             created_at: Utc::now(),
         };
-        
+
         let task_id = storage.push_with_priority(email, Priority::Medium).await?;
         info!("  📤 Medium priority job queued: {}", task_id);
     }
@@ -94,7 +94,7 @@ async fn produce_jobs(storage: &NatsStorage<Email>) -> Result<(), Box<dyn std::e
             body: "This is a low priority newsletter".to_string(),
             created_at: Utc::now(),
         };
-        
+
         let task_id = storage.push_with_priority(email, Priority::Low).await?;
         info!("  📤 Low priority job queued: {}", task_id);
     }
@@ -108,9 +108,12 @@ fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
     // Configure OpenTelemetry with OTLP exporter
     let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:4317".to_string());
-    
-    info!("📡 Configuring OpenTelemetry with endpoint: {}", otlp_endpoint);
-    
+
+    info!(
+        "📡 Configuring OpenTelemetry with endpoint: {}",
+        otlp_endpoint
+    );
+
     let otlp_exporter = opentelemetry_otlp::new_exporter()
         .tonic()
         .with_endpoint(otlp_endpoint);
@@ -131,10 +134,10 @@ fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
 
     // Set global tracer provider
     global::set_tracer_provider(tracer.provider().unwrap().clone());
-    
+
     // Configure tracing subscriber with OpenTelemetry layer
     let otel_layer = OpenTelemetryLayer::new(tracer);
-    
+
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(otel_layer)
@@ -147,10 +150,7 @@ fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(feature = "otel"))]
 fn init_telemetry() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize basic tracing without OpenTelemetry
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_timestamp(true)
-        .init();
+    tracing_subscriber::fmt().with_target(false).init();
     Ok(())
 }
 
@@ -160,29 +160,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_telemetry()?;
 
     info!("🎯 Starting NATS JetStream job queue example");
-    
+
     #[cfg(feature = "otel")]
     info!("🔍 OpenTelemetry tracing is ENABLED");
-    
+
     #[cfg(not(feature = "otel"))]
     info!("⚠️ OpenTelemetry tracing is DISABLED (enable with --features otel)");
 
     // Connect to NATS
-    let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
+    let nats_url =
+        std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
     info!("📡 Connecting to NATS at: {}", nats_url);
-    
+
     let client = apalis_nats::connect(&nats_url).await?;
     info!("✅ Connected to NATS successfully");
 
     // Configure storage
-    let mut config = Config {
+    let config = Config {
         namespace: "apalis_example".to_string(),
         max_deliver: 3,
         ack_wait: Duration::from_secs(30),
         num_replicas: 1,
         enable_dlq: true,
+        ..Default::default()
     };
-    
+
     #[cfg(feature = "otel")]
     {
         config.enable_tracing = true;
@@ -200,7 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create and run worker
     info!("👷 Starting worker...");
-    
+
     let worker = WorkerBuilder::new("email-worker")
         .concurrency(2)
         .backend(storage.clone())
@@ -209,20 +211,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Run worker with monitoring
     Monitor::new()
         .register(worker)
-        .on_event(|event| {
-            match &event {
-                Event::WorkerStarted(id) => info!("🚀 Worker {} started", id),
-                Event::WorkerStopped(id) => info!("🛑 Worker {} stopped", id),
-                Event::JobStarted(id) => info!("⚡ Job {} started", id),
-                Event::JobCompleted(id) => info!("✅ Job {} completed", id),
-                Event::JobFailed(id, err) => error!("❌ Job {} failed: {:?}", id, err),
-                _ => {}
-            }
-        })
         .shutdown_timeout(Duration::from_secs(5))
         .run_with_signal(async {
-            tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl+c");
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to listen for ctrl+c");
             info!("🛑 Shutting down gracefully...");
+            Ok(())
         })
         .await?;
 

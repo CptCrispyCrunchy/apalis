@@ -209,6 +209,68 @@ Workers poll streams in priority order:
 
 This ensures high-priority jobs are always processed first while preventing starvation of lower priorities.
 
+### DLQ Message Format
+
+When a job is sent to the Dead Letter Queue (DLQ), the crate publishes a JSON object to the `{namespace}.dlq` subject with the following fields:
+
+```json
+{
+  "original_task_id": "<TaskId as string>",
+  "error": "string description of the last error",
+  "attempts": "Debug representation of Attempt",
+  "delivered_count": 3,
+  "timestamp": "RFC3339 timestamp",
+  "dlq_reason": "abort_error | max_deliver_exceeded",
+  "payload": "<base64-encoded bytes>"
+}
+```
+
+- original_task_id: The original task ID associated with the message.
+- error: The error string returned by the handler on the final attempt.
+- attempts: The Attempt debug string capturing retry metadata.
+- delivered_count: Number of deliveries recorded by JetStream for this message.
+- timestamp: Time the DLQ entry was created.
+- dlq_reason: Reason for routing to DLQ.
+  - abort_error: The handler returned a non-transient Error::Abort(_), so the job was terminated immediately.
+  - max_deliver_exceeded: The message exceeded `max_deliver` attempts and failed again.
+- payload: Base64-encoded original message payload as received from NATS (i.e., the serialized NatsJob<T> bytes). This allows reinspection or manual replay if necessary.
+
+Notes:
+- The crate publishes to the DLQ first and only then acknowledges the original message. If publish fails, the original message is not acked and will redeliver, ensuring DLQ routing is retried.
+- If DLQ is disabled (`enable_dlq = false`), `Error::Abort(_)` results in a Term ack (no redelivery), while other errors use Nak for retry until `max_deliver`.
+
+## Dead Letter Queue (DLQ) Message Format
+
+When jobs fail after maximum retries or encounter non-transient errors, they are moved to the DLQ with the following JSON structure:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `original_task_id` | String | The original task ID (ULID format) |
+| `error` | String | The error message that caused the failure |
+| `attempts` | String | Debug representation of attempt count |
+| `delivered_count` | Number | Number of delivery attempts by NATS |
+| `timestamp` | String | RFC3339 timestamp when moved to DLQ |
+| `payload` | Bytes | Original NATS message payload (serialized `NatsJob<T>`) |
+
+**Note:** The `payload` field contains the exact bytes of the original NATS message, which is the serialized `NatsJob<T>` structure. This allows for offline inspection and potential requeuing of failed jobs. When serialized to JSON, these bytes are base64-encoded by serde_json.
+
+### Example DLQ Message
+
+```json
+{
+  "original_task_id": "01K4QGM32F0NBKHDG1D89X4212",
+  "error": "Connection timeout",
+  "attempts": "Attempt(5)",
+  "delivered_count": 5,
+  "timestamp": "2024-01-15T10:30:45.123Z",
+  "payload": [123, 34, 105, 100, 34, ...] // Raw bytes of NatsJob<T>
+}
+```
+
+### Requeuing Failed Jobs
+
+To requeue a job from the DLQ, you can deserialize the `payload` field back into a `NatsJob<T>` and republish it to the appropriate priority stream.
+
 ## Testing
 
 Run integration tests with Docker:
@@ -218,6 +280,20 @@ cargo test --package apalis-nats
 ```
 
 The tests use testcontainers to automatically spin up a NATS JetStream instance.
+
+## Scheduling
+
+**Note:** Scheduled and delayed jobs are not currently supported in the NATS JetStream backend when using pull consumers. The `schedule_request` and `reschedule` methods will return an error indicating this limitation.
+
+### Alternatives for Scheduling
+
+If you need delayed job execution, consider these alternatives:
+
+1. **Separate Scheduler Service**: Implement a dedicated scheduler that tracks job timings and publishes to NATS at the appropriate time.
+2. **NATS Key-Value Store**: Use NATS KV with TTL/expiration to trigger job republishing.
+3. **Application-Level Delay**: Handle delays in your job processing logic by checking timestamps and re-enqueueing if needed.
+
+Future versions may implement scheduling support using delayed subjects or JetStream timers, but this requires careful consideration of durability and failure scenarios.
 
 ## Requirements
 

@@ -76,10 +76,13 @@ where
         ] {
             let consumer_name = format!("{}_{}_consumer", self.config.namespace, priority);
             let stream_name = self.get_stream_name(priority);
-            
+
             // Check if the shared consumer exists
             if let Ok(stream) = self.jetstream.get_stream(stream_name).await {
-                if let Ok(_consumer) = stream.get_consumer::<consumer::pull::Config>(&consumer_name).await {
+                if let Ok(_consumer) = stream
+                    .get_consumer::<consumer::pull::Config>(&consumer_name)
+                    .await
+                {
                     let worker_id = apalis_core::worker::WorkerId::new(consumer_name.clone());
                     let worker = Worker::new(worker_id, WorkerState::new::<Self>(consumer_name));
                     workers.push(worker);

@@ -11,13 +11,13 @@ serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 chrono = { version = "0.4", features = ["serde"] }
-async-nats = "0.35"
+async-nats = "0.39"
 
 # OpenTelemetry dependencies (optional)
-opentelemetry = { version = "0.25", optional = true }
-opentelemetry-otlp = { version = "0.25", optional = true }
-opentelemetry_sdk = { version = "0.25", features = ["rt-tokio-current-thread"], optional = true }
-tracing-opentelemetry = { version = "0.27", optional = true }
+opentelemetry = { version = "0.28", optional = true }
+opentelemetry-otlp = { version = "0.28", optional = true }
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio-current-thread"], optional = true }
+tracing-opentelemetry = { version = "0.29", optional = true }
 
 [features]
 default = []

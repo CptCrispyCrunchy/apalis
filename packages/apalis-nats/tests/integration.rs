@@ -45,7 +45,7 @@ async fn setup_nats() -> (ContainerAsync<Nats>, NatsStorage<TestJob>) {
         .expect("Failed to get port");
 
     let nats_url = format!("nats://{}:{}", host, port);
-    
+
     // Give NATS a moment to fully initialize
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -62,7 +62,7 @@ async fn setup_nats() -> (ContainerAsync<Nats>, NatsStorage<TestJob>) {
         num_replicas: 1,
         enable_dlq: true,
         max_ack_pending: 10, // Lower for testing to avoid message duplication
-        flow_control: true,
+        ..Default::default()
     };
 
     let storage = NatsStorage::new_with_config(client, config)
@@ -88,7 +88,7 @@ async fn setup_nats_raw() -> (ContainerAsync<Nats>, async_nats::Client) {
         .expect("Failed to get port");
 
     let nats_url = format!("nats://{}:{}", host, port);
-    
+
     // Give NATS a moment to fully initialize
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -132,10 +132,7 @@ async fn test_end_to_end_job_execution() {
 
     let mut pushed_jobs = Vec::new();
     for job in &jobs {
-        let task_id = storage
-            .push(job.clone())
-            .await
-            .expect("Failed to push job");
+        let task_id = storage.push(job.clone()).await.expect("Failed to push job");
         println!("Pushed job {} with ID: {:?}", job.id, &task_id);
         pushed_jobs.push(task_id);
     }
@@ -158,7 +155,7 @@ async fn test_end_to_end_job_execution() {
     // Check results
     let executed = executed_jobs.lock().await;
     assert_eq!(executed.len(), 3, "All jobs should be executed");
-    
+
     // Verify all jobs were executed
     for job in &jobs {
         assert!(
@@ -185,10 +182,7 @@ async fn test_priority_queue_ordering() {
     let execution_order = Arc::new(Mutex::new(Vec::<String>::new()));
     let order_clone = execution_order.clone();
 
-    async fn track_job(
-        job: TestJob,
-        order: Data<Arc<Mutex<Vec<String>>>>,
-    ) -> Result<(), Error> {
+    async fn track_job(job: TestJob, order: Data<Arc<Mutex<Vec<String>>>>) -> Result<(), Error> {
         println!("Processing job with message: {}", job.message);
         order.lock().await.push(job.message.clone());
         // Simulate some work
@@ -285,10 +279,7 @@ async fn test_job_retry_and_failure() {
     let attempt_counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = attempt_counter.clone();
 
-    async fn failing_job(
-        job: TestJob,
-        counter: Data<Arc<AtomicUsize>>,
-    ) -> Result<(), Error> {
+    async fn failing_job(job: TestJob, counter: Data<Arc<AtomicUsize>>) -> Result<(), Error> {
         let attempt = counter.fetch_add(1, Ordering::SeqCst) + 1;
         println!("Job {} attempt #{}", job.id, attempt);
 
@@ -298,7 +289,8 @@ async fn test_job_retry_and_failure() {
             return Err(Error::Failed(Arc::new(Box::new(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("Intentional failure on attempt {}", attempt),
-            )) as Box<dyn std::error::Error + Send + Sync>)));
+            ))
+                as Box<dyn std::error::Error + Send + Sync>)));
         } else {
             // Succeed on the third attempt
             println!("Job {} succeeded on attempt {}", job.id, attempt);
@@ -403,11 +395,7 @@ async fn test_concurrent_workers() {
 
     // Check results
     let processed = processed_jobs.lock().await;
-    assert_eq!(
-        processed.len(),
-        num_jobs,
-        "All jobs should be processed"
-    );
+    assert_eq!(processed.len(), num_jobs, "All jobs should be processed");
 
     // Verify that both workers processed some jobs
     let worker1_count = processed.iter().filter(|(_, w)| w == "worker-1").count();
@@ -494,13 +482,16 @@ async fn test_dlq_on_max_deliveries() {
         .try_init();
 
     let (_container, client) = setup_nats_raw().await;
-    
+
     // Create storage with max_deliver = 2 for faster testing
     let mut config = Config::default();
-    config.namespace = format!("test_{}", uuid::Uuid::new_v4().to_string().replace("-", "_"));
+    config.namespace = format!(
+        "test_{}",
+        uuid::Uuid::new_v4().to_string().replace("-", "_")
+    );
     config.max_deliver = 2; // Only 2 attempts before DLQ
     config.enable_dlq = true;
-    
+
     let mut storage = NatsStorage::<TestJob>::new_with_config(client.clone(), config.clone())
         .await
         .expect("Failed to create storage");
@@ -515,12 +506,13 @@ async fn test_dlq_on_max_deliveries() {
     ) -> Result<(), Error> {
         let attempt = counter.fetch_add(1, Ordering::SeqCst) + 1;
         println!("Job {} attempt #{} (will always fail)", job.id, attempt);
-        
+
         // Always fail with a transient error
         Err(Error::Failed(Arc::new(Box::new(std::io::Error::new(
             std::io::ErrorKind::Other,
             format!("Intentional failure on attempt {}", attempt),
-        )) as Box<dyn std::error::Error + Send + Sync>)))
+        ))
+            as Box<dyn std::error::Error + Send + Sync>)))
     }
 
     // Push a job that will always fail
@@ -554,7 +546,7 @@ async fn test_dlq_on_max_deliveries() {
     // Check DLQ stream for the failed job
     let jetstream = jetstream::new(client);
     let dlq_stream_name = format!("{}_dlq", config.namespace);
-    
+
     if let Ok(mut stream) = jetstream.get_stream(dlq_stream_name.clone()).await {
         let info = stream.info().await.expect("Failed to get stream info");
         assert!(
@@ -563,37 +555,52 @@ async fn test_dlq_on_max_deliveries() {
             info.state.messages
         );
         println!("DLQ contains {} message(s)", info.state.messages);
-        
+
         // Try to read the DLQ message to verify its content
         let dlq_subject = format!("{}.dlq", config.namespace);
-        if let Ok(consumer) = stream.create_consumer(consumer::pull::Config {
-            durable_name: Some("dlq-reader".to_string()),
-            ..Default::default()
-        }).await {
+        if let Ok(consumer) = stream
+            .create_consumer(consumer::pull::Config {
+                durable_name: Some("dlq-reader".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
             if let Ok(mut messages) = consumer.messages().await {
                 if let Ok(Some(msg)) = messages.try_next().await {
-                    let dlq_data: serde_json::Value = serde_json::from_slice(&msg.payload)
-                        .expect("Failed to parse DLQ message");
-                    
+                    let dlq_data: serde_json::Value =
+                        serde_json::from_slice(&msg.payload).expect("Failed to parse DLQ message");
+
                     // Verify DLQ message contains expected fields
-                    assert!(dlq_data.get("original_task_id").is_some(), "DLQ message should contain original_task_id");
-                    assert!(dlq_data.get("error").is_some(), "DLQ message should contain error");
-                    assert!(dlq_data.get("delivered_count").is_some(), "DLQ message should contain delivered_count");
+                    assert!(
+                        dlq_data.get("original_task_id").is_some(),
+                        "DLQ message should contain original_task_id"
+                    );
+                    assert!(
+                        dlq_data.get("error").is_some(),
+                        "DLQ message should contain error"
+                    );
+                    assert!(
+                        dlq_data.get("delivered_count").is_some(),
+                        "DLQ message should contain delivered_count"
+                    );
                     assert_eq!(
                         dlq_data.get("delivered_count").and_then(|v| v.as_u64()),
                         Some(2),
                         "Delivered count should be 2"
                     );
-                    
+
                     println!("DLQ message verified: {:?}", dlq_data);
-                    
+
                     // Acknowledge to clean up
                     msg.ack().await.ok();
                 }
             }
         }
     } else {
-        panic!("DLQ stream {} should exist but was not found", dlq_stream_name);
+        panic!(
+            "DLQ stream {} should exist but was not found",
+            dlq_stream_name
+        );
     }
 
     // Cleanup
@@ -608,12 +615,15 @@ async fn test_dlq_on_abort_error() {
         .try_init();
 
     let (_container, client) = setup_nats_raw().await;
-    
+
     // Create storage with DLQ enabled
     let mut config = Config::default();
-    config.namespace = format!("test_{}", uuid::Uuid::new_v4().to_string().replace("-", "_"));
+    config.namespace = format!(
+        "test_{}",
+        uuid::Uuid::new_v4().to_string().replace("-", "_")
+    );
     config.enable_dlq = true;
-    
+
     let mut storage = NatsStorage::<TestJob>::new_with_config(client.clone(), config.clone())
         .await
         .expect("Failed to create storage");
@@ -624,7 +634,8 @@ async fn test_dlq_on_abort_error() {
         Err(Error::Abort(Arc::new(Box::new(std::io::Error::new(
             std::io::ErrorKind::Other,
             "Non-transient error - send to DLQ",
-        )) as Box<dyn std::error::Error + Send + Sync>)))
+        ))
+            as Box<dyn std::error::Error + Send + Sync>)))
     }
 
     // Push a job that will abort
@@ -649,7 +660,7 @@ async fn test_dlq_on_abort_error() {
     // Check DLQ stream for the aborted job
     let jetstream = jetstream::new(client);
     let dlq_stream_name = format!("{}_dlq", config.namespace);
-    
+
     if let Ok(mut stream) = jetstream.get_stream(dlq_stream_name.clone()).await {
         let info = stream.info().await.expect("Failed to get stream info");
         assert!(
@@ -657,9 +668,15 @@ async fn test_dlq_on_abort_error() {
             "DLQ should contain the aborted job, but has {} messages",
             info.state.messages
         );
-        println!("DLQ contains {} message(s) after abort", info.state.messages);
+        println!(
+            "DLQ contains {} message(s) after abort",
+            info.state.messages
+        );
     } else {
-        panic!("DLQ stream {} should exist but was not found", dlq_stream_name);
+        panic!(
+            "DLQ stream {} should exist but was not found",
+            dlq_stream_name
+        );
     }
 
     // Cleanup
