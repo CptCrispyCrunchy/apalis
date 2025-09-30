@@ -10,5 +10,5 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-async-nats = "0.39"
+async-nats = "0.42"
 uuid = { version = "1.8", features = ["v4"] }
