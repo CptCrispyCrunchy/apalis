@@ -6,7 +6,7 @@
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 //! NATS JetStream storage for Apalis jobs.
-//! 
+//!
 //! - Priority queues (high/medium/low)
 //! - DLQ routing on abort errors or after max deliveries
 //! - At-least-once delivery, configurable retries with backoff
@@ -30,7 +30,7 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let client = apalis_nats::connect("nats://localhost:4222").await?;
-//!     let storage = NatsStorage::new(client).await?;
+//!     let mut storage = NatsStorage::new(client).await?;
 //!
 //!     storage.push(Email { to: "user@example.com".into() }).await?;
 //!
@@ -92,9 +92,10 @@
 //! # async fn demo2() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = apalis_nats::connect("nats://localhost:4222").await?;
 //! let storage = NatsStorage::<Job>::new(client).await?;
-//!
-//! let worker = WorkerBuilder::new("panic-aware")
-//!     .catch_panic() // requires `apalis` feature `catch-panic`
+//! let builder = WorkerBuilder::new("panic-aware");
+//! #[cfg(feature = "catch-panic")]
+//! let builder = builder.catch_panic();
+//! let worker = builder
 //!     .backend(storage.clone())
 //!     .build_fn(handler);
 //!
@@ -199,9 +200,9 @@ mod expose;
 mod layers;
 mod storage;
 
+pub use crate::layers::ProgressHeartbeatLayer;
 pub use async_nats::{Client, ConnectError, ConnectOptions};
 pub use storage::{
     connect, connect_with_credentials, connect_with_options, connect_with_user_pass, Config,
     NatsContext, NatsPollError, NatsQueueInfo, NatsStorage, Priority,
 };
-pub use crate::layers::ProgressHeartbeatLayer;
