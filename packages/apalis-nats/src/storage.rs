@@ -32,7 +32,7 @@ use opentelemetry::trace::{Span as OtelSpan, SpanKind, Status, Tracer};
 #[cfg(feature = "otel")]
 use opentelemetry::{global, Context as OtelContext, KeyValue};
 #[cfg(feature = "otel")]
-use opentelemetry::{NatsHeaderExtractor, NatsHeaderInjector};
+use crate::otel::{NatsHeaderExtractor, NatsHeaderInjector};
 #[cfg(feature = "otel")]
 use tracing::Span;
 #[cfg(feature = "otel")]
@@ -161,9 +161,7 @@ impl NatsContext {
         {
             // Extract trace context from message headers
             let trace_context = global::get_text_map_propagator(|propagator| {
-                propagator.extract(&NatsHeaderExtractor::new(
-                    message.headers.as_ref().unwrap_or(&HeaderMap::new()),
-                ))
+                propagator.extract(&NatsHeaderExtractor::new_from_message(&message.message))
             });
 
             Self {

@@ -199,6 +199,8 @@
 mod expose;
 mod layers;
 mod storage;
+#[cfg(feature = "otel")]
+mod otel;
 
 pub use crate::layers::ProgressHeartbeatLayer;
 pub use async_nats::{Client, ConnectError, ConnectOptions};
@@ -206,3 +208,5 @@ pub use storage::{
     connect, connect_with_credentials, connect_with_options, connect_with_user_pass, Config,
     NatsContext, NatsPollError, NatsQueueInfo, NatsStorage, Priority,
 };
+#[cfg(feature = "otel")]
+pub use crate::otel::{attach_span_context, NatsHeaderExtractor, NatsHeaderInjector};
