@@ -14,13 +14,13 @@ use apalis_core::worker::{Context as WorkerContext, Worker};
 use async_nats::jetstream::{self, consumer, stream};
 use async_nats::{Client, ConnectError, HeaderMap};
 use bytes::Bytes;
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc::{self, Sender};
 use futures::stream::BoxStream;
 use futures::{SinkExt, StreamExt, TryStreamExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -32,7 +32,7 @@ use opentelemetry::trace::{Span as OtelSpan, SpanKind, Status, Tracer};
 #[cfg(feature = "otel")]
 use opentelemetry::{global, Context as OtelContext, KeyValue};
 #[cfg(feature = "otel")]
-use opentelemetry_nats::{NatsHeaderExtractor, NatsHeaderInjector};
+use opentelemetry::{NatsHeaderExtractor, NatsHeaderInjector};
 #[cfg(feature = "otel")]
 use tracing::Span;
 #[cfg(feature = "otel")]
@@ -209,11 +209,7 @@ pub struct NatsStorage<T> {
     client: Client,
     pub(crate) jetstream: jetstream::Context,
     pub(crate) config: Config,
-    consumers: Arc<
-        std::sync::Mutex<
-            HashMap<Priority, consumer::Consumer<consumer::pull::Config>>,
-        >,
-    >,
+    consumers: Arc<std::sync::Mutex<HashMap<Priority, consumer::Consumer<consumer::pull::Config>>>>,
     _phantom: PhantomData<T>,
 }
 
@@ -882,11 +878,8 @@ where
                     if let Ok(consumer) = self.get_or_create_consumer(priority).await {
                         if let Ok(mut batch) = consumer.fetch().max_messages(1).messages().await {
                             // Apply client-side expiry to avoid blocking on empty queues
-                            match tokio::time::timeout(
-                                self.config.fetch_expiry,
-                                batch.try_next(),
-                            )
-                            .await
+                            match tokio::time::timeout(self.config.fetch_expiry, batch.try_next())
+                                .await
                             {
                                 Ok(Ok(Some(msg))) => {
                                     match serde_json::from_slice::<NatsJob<T>>(&msg.payload) {
@@ -902,15 +895,18 @@ where
                                         }
                                         Err(e) => {
                                             // Malformed payload: log and terminate to avoid endless redelivery
-                    tracing::error!("Failed to deserialize job payload: {}", e);
+                                            tracing::error!(
+                                                "Failed to deserialize job payload: {}",
+                                                e
+                                            );
                                             if let Err(ack_err) =
                                                 msg.ack_with(jetstream::AckKind::Term).await
                                             {
-                                            tracing::error!(
-                                                "Failed to term malformed message: {}",
-                                                ack_err
-                                            );
-                                        }
+                                                tracing::error!(
+                                                    "Failed to term malformed message: {}",
+                                                    ack_err
+                                                );
+                                            }
                                         }
                                     }
                                 }
