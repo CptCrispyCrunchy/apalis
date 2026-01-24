@@ -89,6 +89,15 @@ impl NatsHeaderInjector {
         let ctx_propagator = TraceContextPropagator::new();
         ctx_propagator.inject_context(&Span::current().context(), self);
     }
+
+    /// Injects an explicit OpenTelemetry context into the headers.
+    ///
+    /// This is useful when you have a specific OTel span context that you want to propagate,
+    /// rather than using the current tracing span's context.
+    pub fn inject_otel_context(&mut self, context: &opentelemetry::Context) {
+        let ctx_propagator = TraceContextPropagator::new();
+        ctx_propagator.inject_context(context, self);
+    }
 }
 
 impl Injector for NatsHeaderInjector {

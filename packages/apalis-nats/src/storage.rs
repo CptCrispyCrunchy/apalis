@@ -28,15 +28,11 @@ use std::time::Duration;
 use thiserror::Error;
 
 #[cfg(feature = "otel")]
-use opentelemetry::trace::{Span as OtelSpan, SpanKind, Status, Tracer};
+use opentelemetry::trace::{Span as OtelSpan, SpanKind, Status, TraceContextExt, Tracer};
 #[cfg(feature = "otel")]
 use opentelemetry::{global, Context as OtelContext, KeyValue};
 #[cfg(feature = "otel")]
 use crate::otel::{NatsHeaderExtractor, NatsHeaderInjector};
-#[cfg(feature = "otel")]
-use tracing::Span;
-#[cfg(feature = "otel")]
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Priority levels for jobs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -419,22 +415,6 @@ where
         job: T,
         priority: Priority,
     ) -> Result<TaskId, NatsPollError> {
-        #[cfg(feature = "otel")]
-        let mut _span = if self.config.enable_tracing {
-            let tracer = global::tracer("apalis-nats");
-            let span = tracer
-                .span_builder("job.push")
-                .with_kind(SpanKind::Producer)
-                .with_attributes(vec![
-                    KeyValue::new("job.priority", priority.to_string()),
-                    KeyValue::new("job.namespace", self.config.namespace.clone()),
-                ])
-                .start(&tracer);
-            Some(span)
-        } else {
-            None
-        };
-
         let task_id = TaskId::new();
         let nats_job = NatsJob {
             id: task_id.clone(),
@@ -448,34 +428,49 @@ where
         let payload = serde_json::to_vec(&nats_job)?;
         let subject = self.get_subject(priority);
 
-        // Prepare headers with OpenTelemetry trace context
-        let mut headers = HeaderMap::new();
+        // Prepare headers - when OTel is enabled, we create a producer span synchronously,
+        // inject its context into headers, then let the span complete.
+        // We use a block scope so the span is dropped before any await points.
+        let headers = {
+            #[cfg(feature = "otel")]
+            if self.config.enable_tracing {
+                let tracer = global::tracer("apalis-nats");
+                let mut span = tracer
+                    .span_builder("job.push")
+                    .with_kind(SpanKind::Producer)
+                    .with_attributes(vec![
+                        KeyValue::new("job.id", task_id.to_string()),
+                        KeyValue::new("job.priority", priority.to_string()),
+                        KeyValue::new("job.namespace", self.config.namespace.clone()),
+                    ])
+                    .start(&tracer);
 
-        #[cfg(feature = "otel")]
-        if self.config.enable_tracing {
-            // Inject current trace context into headers
-            let cx = Span::current().context();
-            global::get_text_map_propagator(|propagator| {
-                let mut injector = NatsHeaderInjector::new(headers.clone());
-                propagator.inject_context(&cx, &mut injector);
-                headers = injector.into();
-            });
-        }
+                // Create a context with this span and inject into headers
+                let span_context = span.span_context().clone();
+                let cx = OtelContext::current().with_remote_span_context(span_context);
+                let mut injector = NatsHeaderInjector::new(HeaderMap::new());
+                injector.inject_otel_context(&cx);
 
-        // Publish with headers
+                // Mark span as successful - it represents the "send" action
+                span.set_status(Status::Ok);
+                // span drops here, ending the producer span
+
+                injector.into()
+            } else {
+                HeaderMap::new()
+            }
+
+            #[cfg(not(feature = "otel"))]
+            HeaderMap::new()
+        };
+
+        // Publish with headers - this is the async part, no span held
         self.jetstream
             .publish_with_headers(subject, headers, Bytes::from(payload))
             .await
             .map_err(|e| NatsPollError::Nats(e.to_string()))?
             .await
             .map_err(|e| NatsPollError::Nats(e.to_string()))?;
-
-        #[cfg(feature = "otel")]
-        if let Some(ref mut span) = _span {
-            use OtelSpan;
-            span.set_attribute(KeyValue::new("job.id", task_id.to_string()));
-            span.set_status(Status::Ok);
-        }
 
         Ok(task_id)
     }
@@ -492,18 +487,8 @@ where
         &self,
         job: T,
         priority: Priority,
-        context: &OtelContext,
+        parent_context: &OtelContext,
     ) -> Result<TaskId, NatsPollError> {
-        let tracer = global::tracer("apalis-nats");
-        let mut span = tracer
-            .span_builder("job.push")
-            .with_kind(SpanKind::Producer)
-            .with_attributes(vec![
-                KeyValue::new("job.priority", priority.to_string()),
-                KeyValue::new("job.namespace", self.config.namespace.clone()),
-            ])
-            .start_with_context(&tracer, context);
-
         let task_id = TaskId::new();
         let nats_job = NatsJob {
             id: task_id.clone(),
@@ -517,16 +502,29 @@ where
         let payload = serde_json::to_vec(&nats_job)?;
         let subject = self.get_subject(priority);
 
-        // Prepare headers with provided trace context
-        let mut headers = HeaderMap::new();
+        // Create the producer span with the provided parent context, inject headers, then drop span
+        // This must be done synchronously to avoid holding span across await points
+        let headers = {
+            let tracer = global::tracer("apalis-nats");
+            let mut span = tracer
+                .span_builder("job.push")
+                .with_kind(SpanKind::Producer)
+                .with_attributes(vec![
+                    KeyValue::new("job.id", task_id.to_string()),
+                    KeyValue::new("job.priority", priority.to_string()),
+                    KeyValue::new("job.namespace", self.config.namespace.clone()),
+                ])
+                .start_with_context(&tracer, parent_context);
 
-        if self.config.enable_tracing {
-            global::get_text_map_propagator(|propagator| {
-                let mut injector = NatsHeaderInjector::new(headers.clone());
-                propagator.inject_context(context, &mut injector);
-                headers = injector.into();
-            });
-        }
+            // Create a context with this span and inject into headers
+            let span_context = span.span_context().clone();
+            let cx = OtelContext::current().with_remote_span_context(span_context);
+            let mut injector = NatsHeaderInjector::new(HeaderMap::new());
+            injector.inject_otel_context(&cx);
+
+            span.set_status(Status::Ok);
+            injector.into()
+        };
 
         // Publish with headers
         self.jetstream
@@ -535,10 +533,6 @@ where
             .map_err(|e| NatsPollError::Nats(e.to_string()))?
             .await
             .map_err(|e| NatsPollError::Nats(e.to_string()))?;
-
-        use OtelSpan;
-        span.set_attribute(KeyValue::new("job.id", task_id.to_string()));
-        span.set_status(Status::Ok);
 
         Ok(task_id)
     }
