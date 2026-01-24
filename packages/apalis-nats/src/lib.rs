@@ -108,7 +108,7 @@
 //! - Streams: one per priority plus optional DLQ, all under the same `namespace`.
 //! - Consumers: shared durable pull consumers per priority provide work-queue semantics.
 //! - Heartbeats: for jobs exceeding `ack_wait`, use `NatsContext::progress()` or `ProgressHeartbeatLayer`.
-//! - Tracing: logs use `tracing`; enable OpenTelemetry via the `otel` feature.
+//! - Tracing: logs use `tracing`; enable OpenTelemetry via the `otel` feature. Use `TracingLayer` for automatic CONSUMER span creation with proper parent linkage.
 //!
 //! Configuration Options (Config)
 //! - `namespace: String`
@@ -203,6 +203,8 @@ mod storage;
 mod otel;
 
 pub use crate::layers::ProgressHeartbeatLayer;
+#[cfg(feature = "otel")]
+pub use crate::layers::TracingLayer;
 pub use async_nats::{Client, ConnectError, ConnectOptions};
 pub use storage::{
     connect, connect_with_credentials, connect_with_options, connect_with_user_pass, Config,
