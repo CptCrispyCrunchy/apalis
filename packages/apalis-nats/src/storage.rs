@@ -32,6 +32,8 @@ use opentelemetry::trace::{SpanKind, Status, TraceContextExt, Tracer};
 #[cfg(feature = "otel")]
 use opentelemetry::{global, Context as OtelContext, KeyValue};
 #[cfg(feature = "otel")]
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+#[cfg(feature = "otel")]
 use crate::otel::{NatsHeaderExtractor, NatsHeaderInjector};
 
 /// Priority levels for jobs
@@ -434,6 +436,11 @@ where
         let headers = {
             #[cfg(feature = "otel")]
             if self.config.enable_tracing {
+                // Get the parent context from the current tracing span.
+                // This bridges tracing-opentelemetry spans with OpenTelemetry context,
+                // ensuring job.push becomes a child of the caller's span.
+                let parent_ctx = tracing::Span::current().context();
+
                 let tracer = global::tracer("apalis-nats");
                 let span = tracer
                     .span_builder("job.push")
@@ -443,11 +450,10 @@ where
                         KeyValue::new("job.priority", priority.to_string()),
                         KeyValue::new("job.namespace", self.config.namespace.clone()),
                     ])
-                    .start(&tracer);
+                    .start_with_context(&tracer, &parent_ctx);
 
                 // Create a context with this span as the current span, then inject.
-                // Using with_span() ensures the propagator injects this span's ID as the
-                // parent for consumers, rather than just treating it as a remote reference.
+                // The propagator will inject job.push's span_id as the parent for consumers.
                 let cx = OtelContext::current().with_span(span);
                 let mut injector = NatsHeaderInjector::new(HeaderMap::new());
                 injector.inject_otel_context(&cx);
@@ -518,9 +524,8 @@ where
                 .start_with_context(&tracer, parent_context);
 
             // Create a context with this span as the current span, then inject.
-            // Using with_span() ensures the propagator injects this span's ID as the
-            // parent for consumers, rather than just treating it as a remote reference.
-            let cx = parent_context.with_span(span);
+            // The propagator will inject job.push's span_id as the parent for consumers.
+            let cx = OtelContext::current().with_span(span);
             let mut injector = NatsHeaderInjector::new(HeaderMap::new());
             injector.inject_otel_context(&cx);
 
