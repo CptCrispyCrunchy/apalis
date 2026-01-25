@@ -28,7 +28,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 #[cfg(feature = "otel")]
-use opentelemetry::trace::{Span as OtelSpan, SpanKind, Status, TraceContextExt, Tracer};
+use opentelemetry::trace::{SpanKind, Status, TraceContextExt, Tracer};
 #[cfg(feature = "otel")]
 use opentelemetry::{global, Context as OtelContext, KeyValue};
 #[cfg(feature = "otel")]
@@ -435,7 +435,7 @@ where
             #[cfg(feature = "otel")]
             if self.config.enable_tracing {
                 let tracer = global::tracer("apalis-nats");
-                let mut span = tracer
+                let span = tracer
                     .span_builder("job.push")
                     .with_kind(SpanKind::Producer)
                     .with_attributes(vec![
@@ -445,15 +445,16 @@ where
                     ])
                     .start(&tracer);
 
-                // Create a context with this span and inject into headers
-                let span_context = span.span_context().clone();
-                let cx = OtelContext::current().with_remote_span_context(span_context);
+                // Create a context with this span as the current span, then inject.
+                // Using with_span() ensures the propagator injects this span's ID as the
+                // parent for consumers, rather than just treating it as a remote reference.
+                let cx = OtelContext::current().with_span(span);
                 let mut injector = NatsHeaderInjector::new(HeaderMap::new());
                 injector.inject_otel_context(&cx);
 
-                // Mark span as successful - it represents the "send" action
-                span.set_status(Status::Ok);
-                // span drops here, ending the producer span
+                // Get span back from context to set status before it ends
+                cx.span().set_status(Status::Ok);
+                // span ends when cx is dropped
 
                 injector.into()
             } else {
@@ -506,7 +507,7 @@ where
         // This must be done synchronously to avoid holding span across await points
         let headers = {
             let tracer = global::tracer("apalis-nats");
-            let mut span = tracer
+            let span = tracer
                 .span_builder("job.push")
                 .with_kind(SpanKind::Producer)
                 .with_attributes(vec![
@@ -516,13 +517,15 @@ where
                 ])
                 .start_with_context(&tracer, parent_context);
 
-            // Create a context with this span and inject into headers
-            let span_context = span.span_context().clone();
-            let cx = OtelContext::current().with_remote_span_context(span_context);
+            // Create a context with this span as the current span, then inject.
+            // Using with_span() ensures the propagator injects this span's ID as the
+            // parent for consumers, rather than just treating it as a remote reference.
+            let cx = parent_context.with_span(span);
             let mut injector = NatsHeaderInjector::new(HeaderMap::new());
             injector.inject_otel_context(&cx);
 
-            span.set_status(Status::Ok);
+            // Get span back from context to set status before it ends
+            cx.span().set_status(Status::Ok);
             injector.into()
         };
 
