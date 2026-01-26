@@ -107,8 +107,7 @@ where
     }
 
     fn call(&mut self, request: Request<Req, NatsContext>) -> Self::Future {
-        use opentelemetry::trace::{SpanKind, Status, Tracer};
-        use opentelemetry::{global, KeyValue};
+        use tracing::Instrument;
         use tracing_opentelemetry::OpenTelemetrySpanExt;
 
         let mut inner = self.service.clone();
@@ -118,61 +117,29 @@ where
             // Get the trace context from the NATS message headers (set by job.push producer)
             let parent_context = request.parts.context.trace_context().cloned();
 
-            // Create the consumer span
-            let tracer = global::tracer("apalis-nats");
+            // Build span name based on service name
             let span_name = service_name
                 .as_deref()
                 .map(|name| format!("{}.process", name))
                 .unwrap_or_else(|| "job.process".to_string());
 
-            let span_builder = tracer
-                .span_builder(span_name)
-                .with_kind(SpanKind::Consumer)
-                .with_attributes(vec![
-                    KeyValue::new("messaging.system", "nats"),
-                    KeyValue::new("messaging.operation", "process"),
-                ]);
-
-            // Start span with parent context if available
-            let span = if let Some(ref parent_ctx) = parent_context {
-                span_builder.start_with_context(&tracer, parent_ctx)
-            } else {
-                span_builder.start(&tracer)
-            };
-
-            // Create a tracing span and link it to the OpenTelemetry span
+            // Create a tracing span - tracing-opentelemetry will convert this to an OTel span
+            // Use tracing::info_span! with dynamic name via record
             let tracing_span = tracing::info_span!(
                 "job.process",
+                otel.name = %span_name,
                 otel.kind = "consumer",
                 messaging.system = "nats",
                 messaging.operation = "process"
             );
 
-            // Set the parent context on the tracing span if available
+            // Set the parent context from NATS headers (links to job.push producer span)
             if let Some(parent_ctx) = parent_context {
                 let _ = tracing_span.set_parent(parent_ctx);
             }
 
             // Execute the inner service within the span
-            let result = {
-                let _guard = tracing_span.enter();
-                inner.call(request).await
-            };
-
-            // Mark span as complete
-            use opentelemetry::trace::Span as OtelSpan;
-            match &result {
-                Ok(_) => {
-                    let mut span = span;
-                    span.set_status(Status::Ok);
-                }
-                Err(_) => {
-                    let mut span = span;
-                    span.set_status(Status::error("Job processing failed"));
-                }
-            }
-
-            result
+            inner.call(request).instrument(tracing_span).await
         };
 
         Box::pin(fut)
