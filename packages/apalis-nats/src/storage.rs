@@ -28,7 +28,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 #[cfg(feature = "otel")]
-use opentelemetry::trace::{SpanKind, Status, TraceContextExt, Tracer};
+use opentelemetry::trace::{Span as OtelSpan, SpanKind, Status, TraceContextExt, Tracer};
 #[cfg(feature = "otel")]
 use opentelemetry::{global, Context as OtelContext, KeyValue};
 #[cfg(feature = "otel")]
@@ -437,17 +437,13 @@ where
         let headers = {
             #[cfg(feature = "otel")]
             if self.config.enable_tracing {
-                use opentelemetry::propagation::TextMapPropagator;
-                use opentelemetry_sdk::propagation::TraceContextPropagator;
-                let propagator = TraceContextPropagator::new();
-
                 // Get the parent context from the current tracing span.
                 // The #[instrument] attribute ensures this reflects the caller's span.
                 let parent_ctx = tracing::Span::current().context();
 
                 // Create the producer span as a child of the current span
                 let tracer = global::tracer("apalis-nats");
-                let span = tracer
+                let mut span = tracer
                     .span_builder("job.push")
                     .with_kind(SpanKind::Producer)
                     .with_attributes(vec![
@@ -457,15 +453,20 @@ where
                     ])
                     .start_with_context(&tracer, &parent_ctx);
 
-                // Create context with job.push as the current span, matching nats-common pattern
-                let otel_ctx = OtelContext::current().with_span(span);
+                // Get the span context directly from the span we just created
+                let span_context = span.span_context().clone();
 
-                // Inject trace context into headers
+                // Create a context with this span context for injection
+                let inject_ctx = OtelContext::new().with_remote_span_context(span_context);
+
+                // Use global propagator for injection (same as extraction uses)
                 let mut injector = NatsHeaderInjector::new(HeaderMap::new());
-                propagator.inject_context(&otel_ctx, &mut injector);
+                global::get_text_map_propagator(|propagator| {
+                    propagator.inject_context(&inject_ctx, &mut injector);
+                });
 
                 // Mark span successful before it ends
-                otel_ctx.span().set_status(Status::Ok);
+                span.set_status(Status::Ok);
 
                 injector.into()
             } else {
@@ -517,12 +518,8 @@ where
         // Create the producer span with the provided parent context, inject headers, then drop span
         // This must be done synchronously to avoid holding span across await points
         let headers = {
-            use opentelemetry::propagation::TextMapPropagator;
-            use opentelemetry_sdk::propagation::TraceContextPropagator;
-            let propagator = TraceContextPropagator::new();
-
             let tracer = global::tracer("apalis-nats");
-            let span = tracer
+            let mut span = tracer
                 .span_builder("job.push")
                 .with_kind(SpanKind::Producer)
                 .with_attributes(vec![
@@ -532,15 +529,20 @@ where
                 ])
                 .start_with_context(&tracer, parent_context);
 
-            // Create context with job.push as the current span
-            let otel_ctx = parent_context.with_span(span);
+            // Get the span context directly from the span we just created
+            let span_context = span.span_context().clone();
 
-            // Inject trace context into headers
+            // Create a context with this span context for injection
+            let inject_ctx = OtelContext::new().with_remote_span_context(span_context);
+
+            // Use global propagator for injection (same as extraction uses)
             let mut injector = NatsHeaderInjector::new(HeaderMap::new());
-            propagator.inject_context(&otel_ctx, &mut injector);
+            global::get_text_map_propagator(|propagator| {
+                propagator.inject_context(&inject_ctx, &mut injector);
+            });
 
             // Mark span successful before it ends
-            otel_ctx.span().set_status(Status::Ok);
+            span.set_status(Status::Ok);
             injector.into()
         };
 
