@@ -412,6 +412,7 @@ where
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "otel", tracing::instrument(skip(self, job)))]
     pub async fn push_with_priority(
         &self,
         job: T,
@@ -436,11 +437,15 @@ where
         let headers = {
             #[cfg(feature = "otel")]
             if self.config.enable_tracing {
+                use opentelemetry::propagation::TextMapPropagator;
+                use opentelemetry_sdk::propagation::TraceContextPropagator;
+                let propagator = TraceContextPropagator::new();
+
                 // Get the parent context from the current tracing span.
-                // This bridges tracing-opentelemetry spans with OpenTelemetry context,
-                // ensuring job.push becomes a child of the caller's span.
+                // The #[instrument] attribute ensures this reflects the caller's span.
                 let parent_ctx = tracing::Span::current().context();
 
+                // Create the producer span as a child of the current span
                 let tracer = global::tracer("apalis-nats");
                 let span = tracer
                     .span_builder("job.push")
@@ -452,17 +457,15 @@ where
                     ])
                     .start_with_context(&tracer, &parent_ctx);
 
-                // Create a NEW context with job.push as the current span for injection.
-                // We use parent_ctx.with_span() instead of OtelContext::current().with_span()
-                // because OtelContext::current() may not reflect the tracing span context
-                // and could return the wrong span for injection.
-                let cx = parent_ctx.with_span(span);
-                let mut injector = NatsHeaderInjector::new(HeaderMap::new());
-                injector.inject_otel_context(&cx);
+                // Create context with job.push as the current span, matching nats-common pattern
+                let otel_ctx = OtelContext::current().with_span(span);
 
-                // Get span back from context to set status before it ends
-                cx.span().set_status(Status::Ok);
-                // span ends when cx is dropped
+                // Inject trace context into headers
+                let mut injector = NatsHeaderInjector::new(HeaderMap::new());
+                propagator.inject_context(&otel_ctx, &mut injector);
+
+                // Mark span successful before it ends
+                otel_ctx.span().set_status(Status::Ok);
 
                 injector.into()
             } else {
@@ -514,6 +517,10 @@ where
         // Create the producer span with the provided parent context, inject headers, then drop span
         // This must be done synchronously to avoid holding span across await points
         let headers = {
+            use opentelemetry::propagation::TextMapPropagator;
+            use opentelemetry_sdk::propagation::TraceContextPropagator;
+            let propagator = TraceContextPropagator::new();
+
             let tracer = global::tracer("apalis-nats");
             let span = tracer
                 .span_builder("job.push")
@@ -525,15 +532,15 @@ where
                 ])
                 .start_with_context(&tracer, parent_context);
 
-            // Create a NEW context with job.push as the current span for injection.
-            // We use parent_context.with_span() instead of OtelContext::current().with_span()
-            // because OtelContext::current() may not reflect the provided parent context.
-            let cx = parent_context.with_span(span);
-            let mut injector = NatsHeaderInjector::new(HeaderMap::new());
-            injector.inject_otel_context(&cx);
+            // Create context with job.push as the current span
+            let otel_ctx = parent_context.with_span(span);
 
-            // Get span back from context to set status before it ends
-            cx.span().set_status(Status::Ok);
+            // Inject trace context into headers
+            let mut injector = NatsHeaderInjector::new(HeaderMap::new());
+            propagator.inject_context(&otel_ctx, &mut injector);
+
+            // Mark span successful before it ends
+            otel_ctx.span().set_status(Status::Ok);
             injector.into()
         };
 
