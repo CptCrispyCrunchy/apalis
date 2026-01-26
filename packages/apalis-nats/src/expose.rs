@@ -100,9 +100,7 @@ impl NatsContext {
     /// Acknowledge the message as successfully processed
     pub async fn ack(&self) -> Result<(), Error> {
         if let Some(msg) = &self.message {
-            msg.ack()
-                .await
-                .map_err(|e| Error::SourceError(Arc::new(e.into())))
+            msg.ack().await.map_err(|e| Error::SourceError(Arc::new(e)))
         } else {
             Ok(())
         }
@@ -113,7 +111,7 @@ impl NatsContext {
         if let Some(msg) = &self.message {
             msg.ack_with(jetstream::AckKind::Nak(None))
                 .await
-                .map_err(|e| Error::SourceError(Arc::new(e.into())))
+                .map_err(|e| Error::SourceError(Arc::new(e)))
         } else {
             Ok(())
         }
@@ -124,7 +122,7 @@ impl NatsContext {
         if let Some(msg) = &self.message {
             msg.ack_with(jetstream::AckKind::Term)
                 .await
-                .map_err(|e| Error::SourceError(Arc::new(e.into())))
+                .map_err(|e| Error::SourceError(Arc::new(e)))
         } else {
             Ok(())
         }
@@ -135,7 +133,7 @@ impl NatsContext {
         if let Some(msg) = &self.message {
             msg.ack_with(jetstream::AckKind::Progress)
                 .await
-                .map_err(|e| Error::SourceError(Arc::new(e.into())))
+                .map_err(|e| Error::SourceError(Arc::new(e)))
         } else {
             Ok(())
         }
@@ -178,7 +176,10 @@ impl NatsContext {
                 }
             }
         });
-        Some(ProgressGuard { handle, stop: Some(tx) })
+        Some(ProgressGuard {
+            handle,
+            stop: Some(tx),
+        })
     }
 }
 

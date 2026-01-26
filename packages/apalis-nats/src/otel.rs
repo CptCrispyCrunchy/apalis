@@ -1,16 +1,15 @@
 /// https://github.com/wasmCloud/wasmCloud/blob/main/crates/opentelemetry-nats/src/lib.rs
-use std::sync::OnceLock;
-
 use async_nats::header::{HeaderMap, HeaderValue};
+use once_cell::sync::Lazy;
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use tracing::span::Span;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-static EMPTY_HEADERS: OnceLock<HeaderMap> = OnceLock::new();
+static EMPTY_HEADERS: Lazy<HeaderMap> = Lazy::new(HeaderMap::new);
 
 fn empty_headers() -> &'static HeaderMap {
-    EMPTY_HEADERS.get_or_init(HeaderMap::new)
+    &EMPTY_HEADERS
 }
 
 /// A convenience type that wraps a NATS [`HeaderMap`] and implements the [`Extractor`] trait

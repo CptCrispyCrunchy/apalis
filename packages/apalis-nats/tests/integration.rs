@@ -286,21 +286,21 @@ async fn test_job_retry_and_failure() {
         if attempt < 3 {
             // Fail the first 2 attempts
             println!("Failing job {} on attempt {}", job.id, attempt);
-            return Err(Error::Failed(Arc::new(Box::new(std::io::Error::new(
+            Err(Error::Failed(Arc::new(Box::new(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("Intentional failure on attempt {}", attempt),
             ))
-                as Box<dyn std::error::Error + Send + Sync>)));
+                as Box<dyn std::error::Error + Send + Sync>)))
         } else {
             // Succeed on the third attempt
             println!("Job {} succeeded on attempt {}", job.id, attempt);
-            return Ok(());
+            Ok(())
         }
     }
 
     // Push a job that will fail initially
     let job = TestJob::new("Retry test job");
-    let job_id = job.id.clone();
+    let _job_id = job.id.clone();
     storage.push(job).await.expect("Failed to push job");
 
     // Create worker
@@ -484,13 +484,15 @@ async fn test_dlq_on_max_deliveries() {
     let (_container, client) = setup_nats_raw().await;
 
     // Create storage with max_deliver = 2 for faster testing
-    let mut config = Config::default();
-    config.namespace = format!(
-        "test_{}",
-        uuid::Uuid::new_v4().to_string().replace("-", "_")
-    );
-    config.max_deliver = 2; // Only 2 attempts before DLQ
-    config.enable_dlq = true;
+    let config = Config {
+        namespace: format!(
+            "test_{}",
+            uuid::Uuid::new_v4().to_string().replace('-', "_")
+        ),
+        max_deliver: 2, // Only 2 attempts before DLQ
+        enable_dlq: true,
+        ..Default::default()
+    };
 
     let mut storage = NatsStorage::<TestJob>::new_with_config(client.clone(), config.clone())
         .await
@@ -557,7 +559,7 @@ async fn test_dlq_on_max_deliveries() {
         println!("DLQ contains {} message(s)", info.state.messages);
 
         // Try to read the DLQ message to verify its content
-        let dlq_subject = format!("{}.dlq", config.namespace);
+        let _dlq_subject = format!("{}.dlq", config.namespace);
         if let Ok(consumer) = stream
             .create_consumer(consumer::pull::Config {
                 durable_name: Some("dlq-reader".to_string()),
@@ -617,12 +619,14 @@ async fn test_dlq_on_abort_error() {
     let (_container, client) = setup_nats_raw().await;
 
     // Create storage with DLQ enabled
-    let mut config = Config::default();
-    config.namespace = format!(
-        "test_{}",
-        uuid::Uuid::new_v4().to_string().replace("-", "_")
-    );
-    config.enable_dlq = true;
+    let config = Config {
+        namespace: format!(
+            "test_{}",
+            uuid::Uuid::new_v4().to_string().replace('-', "_")
+        ),
+        enable_dlq: true,
+        ..Default::default()
+    };
 
     let mut storage = NatsStorage::<TestJob>::new_with_config(client.clone(), config.clone())
         .await
@@ -693,14 +697,16 @@ async fn test_long_running_with_heartbeat_prevents_redelivery() {
     let (_container, client) = setup_nats_raw().await;
 
     // Small ack_wait to force redelivery quickly if no progress
-    let mut config = Config::default();
-    config.namespace = format!(
-        "test_{}",
-        uuid::Uuid::new_v4().to_string().replace("-", "_")
-    );
-    config.ack_wait = Duration::from_secs(2);
-    config.max_deliver = 2;
-    config.enable_dlq = true;
+    let config = Config {
+        namespace: format!(
+            "test_{}",
+            uuid::Uuid::new_v4().to_string().replace('-', "_")
+        ),
+        ack_wait: Duration::from_secs(2),
+        max_deliver: 2,
+        enable_dlq: true,
+        ..Default::default()
+    };
 
     let mut storage = NatsStorage::<TestJob>::new_with_config(client.clone(), config.clone())
         .await
@@ -711,7 +717,7 @@ async fn test_long_running_with_heartbeat_prevents_redelivery() {
     let observed_clone = observed.clone();
 
     async fn long_job_with_heartbeat(
-        job: TestJob,
+        _job: TestJob,
         ctx: apalis_nats::NatsContext,
         observed: Data<Arc<Mutex<Vec<u64>>>>,
     ) -> Result<(), Error> {

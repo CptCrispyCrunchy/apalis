@@ -28,13 +28,13 @@ use std::time::Duration;
 use thiserror::Error;
 
 #[cfg(feature = "otel")]
+use crate::otel::{NatsHeaderExtractor, NatsHeaderInjector};
+#[cfg(feature = "otel")]
 use opentelemetry::trace::{Span as OtelSpan, SpanKind, Status, TraceContextExt, Tracer};
 #[cfg(feature = "otel")]
 use opentelemetry::{global, Context as OtelContext, KeyValue};
 #[cfg(feature = "otel")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-#[cfg(feature = "otel")]
-use crate::otel::{NatsHeaderExtractor, NatsHeaderInjector};
 
 /// Priority levels for jobs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -744,7 +744,7 @@ where
                         Error::Abort(_) => true, // Non-transient errors go to DLQ
                         _ => {
                             // Check if we've exceeded max deliveries
-                            info.delivered as i64 >= self.config.max_deliver
+                            info.delivered >= self.config.max_deliver
                         }
                     };
 
@@ -770,8 +770,8 @@ where
                         });
 
                         // Publish to DLQ
-                        let body = serde_json::to_vec(&dlq_job)
-                            .map_err(|e| NatsPollError::Serialization(e))?;
+                        let body =
+                            serde_json::to_vec(&dlq_job).map_err(NatsPollError::Serialization)?;
                         self.jetstream
                             .publish(dlq_subject, body.into())
                             .await
