@@ -452,9 +452,11 @@ where
                     ])
                     .start_with_context(&tracer, &parent_ctx);
 
-                // Create a context with this span as the current span, then inject.
-                // The propagator will inject job.push's span_id as the parent for consumers.
-                let cx = OtelContext::current().with_span(span);
+                // Create a NEW context with job.push as the current span for injection.
+                // We use parent_ctx.with_span() instead of OtelContext::current().with_span()
+                // because OtelContext::current() may not reflect the tracing span context
+                // and could return the wrong span for injection.
+                let cx = parent_ctx.with_span(span);
                 let mut injector = NatsHeaderInjector::new(HeaderMap::new());
                 injector.inject_otel_context(&cx);
 
@@ -523,9 +525,10 @@ where
                 ])
                 .start_with_context(&tracer, parent_context);
 
-            // Create a context with this span as the current span, then inject.
-            // The propagator will inject job.push's span_id as the parent for consumers.
-            let cx = OtelContext::current().with_span(span);
+            // Create a NEW context with job.push as the current span for injection.
+            // We use parent_context.with_span() instead of OtelContext::current().with_span()
+            // because OtelContext::current() may not reflect the provided parent context.
+            let cx = parent_context.with_span(span);
             let mut injector = NatsHeaderInjector::new(HeaderMap::new());
             injector.inject_otel_context(&cx);
 
