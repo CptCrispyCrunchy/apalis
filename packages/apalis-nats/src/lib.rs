@@ -124,9 +124,6 @@
 //!   Whether to move failed jobs to `{namespace}.dlq` subject in the `{namespace}_dlq` stream.
 //! - `max_ack_pending: i64`
 //!   Limits unacked messages per consumer. Tune to match worker concurrency (e.g., 2–4x concurrency).
-//! - `fetch_expiry: Duration`
-//!   Client-side cap for a fetch on one priority before falling through to the next. Improves fairness and shutdown responsiveness.
-//!   Typical: 50–150ms.
 //! - `nak_backoff: Vec<Duration>`
 //!   Backoff schedule for transient errors (Nak with delay). The last value is reused once attempts exceed the list.
 //!   Typical: `[100ms, 200ms, 500ms, 1s, 2s, 5s]`.
@@ -144,7 +141,6 @@
 //!     num_replicas: 3,
 //!     enable_dlq: true,
 //!     max_ack_pending: 200,
-//!     fetch_expiry: Duration::from_millis(75),
 //!     nak_backoff: vec![
 //!         Duration::from_millis(100),
 //!         Duration::from_millis(200),

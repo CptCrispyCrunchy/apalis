@@ -17,7 +17,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc::{self, Sender};
 use futures::stream::BoxStream;
-use futures::{SinkExt, StreamExt, TryStreamExt};
+use futures::{SinkExt, StreamExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -78,8 +78,6 @@ pub struct Config {
     pub enable_dlq: bool,
     /// Maximum number of pending acknowledgments per consumer
     pub max_ack_pending: i64,
-    /// Maximum time to wait for a fetch on one priority before falling through
-    pub fetch_expiry: Duration,
     /// Backoff schedule for transient failures (Nak delays by attempt index)
     /// If shorter than delivered attempts, the last value is used for subsequent attempts.
     pub nak_backoff: Vec<Duration>,
@@ -97,7 +95,6 @@ impl Default for Config {
             num_replicas: 1,
             enable_dlq: true,
             max_ack_pending: 100, // Allow up to 100 unacknowledged messages per consumer
-            fetch_expiry: Duration::from_millis(75),
             nak_backoff: vec![
                 Duration::from_millis(100),
                 Duration::from_millis(200),
@@ -615,6 +612,64 @@ where
         guard.insert(priority, consumer.clone());
         Ok(consumer)
     }
+
+    /// Drop the cached `Consumer` handle for a priority so the next
+    /// `get_or_create_consumer` call re-fetches fresh state from the server.
+    /// Used by the fetch loop when a `messages()` stream errors or ends,
+    /// which typically indicates the server-side consumer was deleted
+    /// (e.g., hit `inactive_threshold`) and must be re-created.
+    fn invalidate_consumer(&self, priority: Priority) {
+        match self.consumers.lock() {
+            Ok(mut guard) => {
+                guard.remove(&priority);
+            }
+            Err(_) => tracing::error!(
+                priority = %priority,
+                "consumer cache mutex poisoned; cannot invalidate"
+            ),
+        }
+    }
+}
+
+/// Open a long-lived `messages()` stream for the given priority's durable
+/// pull consumer. Returns `None` on any failure after logging the error;
+/// the caller should back off and retry on the next iteration.
+///
+/// On failure we also invalidate the consumer cache so that a stale cached
+/// handle (pointing at a server-side consumer that no longer exists) is
+/// re-created from scratch on the next attempt.
+async fn open_messages_stream<T>(
+    storage: &NatsStorage<T>,
+    priority: Priority,
+) -> Option<async_nats::jetstream::consumer::pull::Stream>
+where
+    T: Serialize + DeserializeOwned + Send + 'static,
+{
+    match storage.get_or_create_consumer(priority).await {
+        Ok(consumer) => match consumer.messages().await {
+            Ok(stream) => {
+                tracing::info!(priority = %priority, "opened messages stream");
+                Some(stream)
+            }
+            Err(e) => {
+                tracing::error!(
+                    priority = %priority,
+                    error = %e,
+                    "failed to open messages stream; will retry"
+                );
+                storage.invalidate_consumer(priority);
+                None
+            }
+        },
+        Err(e) => {
+            tracing::error!(
+                priority = %priority,
+                error = %e,
+                "failed to get/create consumer; will retry"
+            );
+            None
+        }
+    }
 }
 
 impl<T> Storage for NatsStorage<T>
@@ -880,69 +935,100 @@ where
             }
         });
 
-        // Spawn the fetch loop (no select!, no always-ready branch)
+        // Spawn the fetch loop: three long-lived `Messages` streams, one per
+        // priority, multiplexed via `tokio::select! { biased; ... }`. The
+        // library internally refills pull requests with flow control, so we
+        // neither leak server-side pulls nor saturate `max_waiting`. On any
+        // stream error or end-of-stream we invalidate the cached Consumer
+        // handle and rebuild the stream on the next outer iteration, which
+        // recovers from server-side consumer deletion (e.g., `inactive_threshold`)
+        // without needing a process restart.
         tokio::spawn(async move {
+            let mut high_stream: Option<async_nats::jetstream::consumer::pull::Stream> = None;
+            let mut med_stream: Option<async_nats::jetstream::consumer::pull::Stream> = None;
+            let mut low_stream: Option<async_nats::jetstream::consumer::pull::Stream> = None;
+            let reopen_backoff = Duration::from_millis(500);
+
             loop {
-                let mut job_found = false;
-                // Try to fetch a job from each priority level in order
-                for priority in [Priority::High, Priority::Medium, Priority::Low] {
-                    // Use shared consumer for work queue semantics
-                    if let Ok(consumer) = self.get_or_create_consumer(priority).await {
-                        if let Ok(mut batch) = consumer.fetch().max_messages(1).messages().await {
-                            // Apply client-side expiry to avoid blocking on empty queues
-                            match tokio::time::timeout(self.config.fetch_expiry, batch.try_next())
-                                .await
-                            {
-                                Ok(Ok(Some(msg))) => {
-                                    match serde_json::from_slice::<NatsJob<T>>(&msg.payload) {
-                                        Ok(job) => {
-                                            let ctx = NatsContext::with_message(msg);
-                                            let request = Request::new_with_ctx(job.data, ctx);
-                                            // Send job to worker
-                                            if job_tx.send(Ok(Some(request))).await.is_err() {
-                                                return; // Channel closed, exit task
-                                            }
-                                            job_found = true;
-                                            break; // Break the for loop to restart from high priority
-                                        }
-                                        Err(e) => {
-                                            // Malformed payload: log and terminate to avoid endless redelivery
-                                            tracing::error!(
-                                                "Failed to deserialize job payload: {}",
-                                                e
-                                            );
-                                            if let Err(ack_err) =
-                                                msg.ack_with(jetstream::AckKind::Term).await
-                                            {
-                                                tracing::error!(
-                                                    "Failed to term malformed message: {}",
-                                                    ack_err
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                                Ok(Ok(None)) => {
-                                    // No message in this batch
-                                }
-                                Ok(Err(e)) => {
-                                    tracing::debug!("Fetch error on priority {}: {}", priority, e);
-                                }
-                                Err(_elapsed) => {
-                                    // Timeout: fall through to next priority
-                                }
-                            }
-                        }
-                    }
+                // Lazily (re)open any missing streams. Each branch logs on
+                // failure so operators see *why* nothing is flowing instead
+                // of observing silent idleness.
+                if high_stream.is_none() {
+                    high_stream = open_messages_stream(&self, Priority::High).await;
+                }
+                if med_stream.is_none() {
+                    med_stream = open_messages_stream(&self, Priority::Medium).await;
+                }
+                if low_stream.is_none() {
+                    low_stream = open_messages_stream(&self, Priority::Low).await;
                 }
 
-                // Apply backoff based on whether we found a job
-                if job_found {
-                    // Short wait when actively processing
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                } else {
-                    // Longer wait when no jobs available
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                if high_stream.is_none() || med_stream.is_none() || low_stream.is_none() {
+                    tokio::time::sleep(reopen_backoff).await;
+                    continue;
+                }
+
+                let h = high_stream.as_mut().unwrap();
+                let m = med_stream.as_mut().unwrap();
+                let l = low_stream.as_mut().unwrap();
+
+                let (priority, item) = tokio::select! {
+                    biased;
+                    r = h.next() => (Priority::High, r),
+                    r = m.next() => (Priority::Medium, r),
+                    r = l.next() => (Priority::Low, r),
+                };
+
+                match item {
+                    Some(Ok(msg)) => match serde_json::from_slice::<NatsJob<T>>(&msg.payload) {
+                        Ok(job) => {
+                            let ctx = NatsContext::with_message(msg);
+                            let request = Request::new_with_ctx(job.data, ctx);
+                            if job_tx.send(Ok(Some(request))).await.is_err() {
+                                tracing::debug!("job channel closed; exiting fetch task");
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                priority = %priority,
+                                error = %e,
+                                "failed to deserialize job payload; terminating message"
+                            );
+                            if let Err(ack_err) = msg.ack_with(jetstream::AckKind::Term).await {
+                                tracing::error!(
+                                    priority = %priority,
+                                    error = %ack_err,
+                                    "failed to Term malformed message"
+                                );
+                            }
+                        }
+                    },
+                    Some(Err(e)) => {
+                        tracing::error!(
+                            priority = %priority,
+                            error = %e,
+                            "messages stream error; invalidating consumer cache and rebuilding"
+                        );
+                        self.invalidate_consumer(priority);
+                        match priority {
+                            Priority::High => high_stream = None,
+                            Priority::Medium => med_stream = None,
+                            Priority::Low => low_stream = None,
+                        }
+                    }
+                    None => {
+                        tracing::warn!(
+                            priority = %priority,
+                            "messages stream ended (consumer likely deleted server-side); rebuilding"
+                        );
+                        self.invalidate_consumer(priority);
+                        match priority {
+                            Priority::High => high_stream = None,
+                            Priority::Medium => med_stream = None,
+                            Priority::Low => low_stream = None,
+                        }
+                    }
                 }
             }
         });
