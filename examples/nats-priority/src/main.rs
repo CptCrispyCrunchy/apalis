@@ -34,7 +34,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let storage = NatsStorage::new_with_config(
         client,
-        Config { namespace: namespace.clone(), ..Default::default() },
+        Config {
+            namespace: namespace.clone(),
+            ..Default::default()
+        },
     )
     .await?;
 
@@ -53,17 +56,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Enqueue: low first, then medium, then high
     for i in 1..=2 {
         storage
-            .push_with_priority(Job { name: format!("low-{}", i) }, Priority::Low)
+            .push_with_priority(
+                Job {
+                    name: format!("low-{}", i),
+                },
+                Priority::Low,
+            )
             .await?;
     }
     for i in 1..=2 {
         storage
-            .push_with_priority(Job { name: format!("medium-{}", i) }, Priority::Medium)
+            .push_with_priority(
+                Job {
+                    name: format!("medium-{}", i),
+                },
+                Priority::Medium,
+            )
             .await?;
     }
     for i in 1..=2 {
         storage
-            .push_with_priority(Job { name: format!("high-{}", i) }, Priority::High)
+            .push_with_priority(
+                Job {
+                    name: format!("high-{}", i),
+                },
+                Priority::High,
+            )
             .await?;
     }
 
@@ -105,4 +123,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Expected: [high-*, high-*] then [medium-*] then [low-*]");
     Ok(())
 }
-

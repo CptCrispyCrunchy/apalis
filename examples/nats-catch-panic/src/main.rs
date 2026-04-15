@@ -52,11 +52,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Queue a normal job and a panic job
     storage
         .clone()
-        .push(Job { name: "ok".into(), panic: false })
+        .push(Job {
+            name: "ok".into(),
+            panic: false,
+        })
         .await?;
     storage
         .clone()
-        .push(Job { name: "will-panic".into(), panic: true })
+        .push(Job {
+            name: "will-panic".into(),
+            panic: true,
+        })
         .await?;
 
     // Worker with catch_panic layer -> panics become Error::Abort and are DLQ’d/Terminated
@@ -99,4 +105,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

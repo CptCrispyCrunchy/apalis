@@ -1,7 +1,7 @@
 use apalis::prelude::*;
 use apalis_nats::{Config, NatsContext, NatsStorage, ProgressHeartbeatLayer};
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, Level};
 
@@ -142,7 +142,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 panic_at_step: Some(step),
             };
             let panic_id = storage.clone().push(panic_job).await?;
-            info!("queued panic demo task with id {:?} (PANIC_AT_STEP={})", panic_id, step);
+            info!(
+                "queued panic demo task with id {:?} (PANIC_AT_STEP={})",
+                panic_id, step
+            );
         }
     }
 
@@ -196,7 +199,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(20);
-        info!("panic demo mode: running for {}s before verifying DLQ", wait_secs);
+        info!(
+            "panic demo mode: running for {}s before verifying DLQ",
+            wait_secs
+        );
         monitor
             .shutdown_timeout(Duration::from_secs(5))
             .run_with_signal(async move {
@@ -214,7 +220,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let dlq_stream = format!("{}_dlq", namespace);
         if let Ok(mut stream) = js.get_stream(dlq_stream.clone()).await {
             if let Ok(info) = stream.info().await {
-                info!("DLQ {} contains {} message(s)", dlq_stream, info.state.messages);
+                info!(
+                    "DLQ {} contains {} message(s)",
+                    dlq_stream, info.state.messages
+                );
             }
         } else {
             info!("DLQ stream {} not found", dlq_stream);
