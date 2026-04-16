@@ -90,7 +90,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             namespace: "apalis".to_string(),
-            max_deliver: 5,
+            max_deliver: 7, // must be > len(nak_backoff)
             ack_wait: Duration::from_secs(30),
             num_replicas: 1,
             enable_dlq: true,
@@ -554,7 +554,9 @@ where
         Ok(task_id)
     }
 
-    /// Create or get a shared consumer for a specific priority
+    /// Create or update a shared consumer for a specific priority.
+    /// Uses `create_consumer` (CreateOrUpdate semantics) so config
+    /// changes take effect on deploy without manual consumer deletion.
     async fn get_or_create_consumer(
         &self,
         priority: Priority,
@@ -603,7 +605,7 @@ where
             .await
             .map_err(|e| NatsPollError::Nats(e.to_string()))?;
         let consumer = stream
-            .get_or_create_consumer(&consumer_name, config)
+            .create_consumer(config)
             .await
             .map_err(|e| NatsPollError::Nats(e.to_string()))?;
 
