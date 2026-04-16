@@ -591,7 +591,13 @@ where
             max_ack_pending: self.config.max_ack_pending,
             // Server-side backoff for redeliveries (ack_wait timeout or NAK).
             // Spreads retries so they don't all fire during the same instability window.
-            backoff: self.config.nak_backoff.clone(),
+            // NATS requires max_deliver > len(backoff), so truncate if needed.
+            backoff: {
+                let max_len = (self.config.max_deliver as usize).saturating_sub(1);
+                let mut b = self.config.nak_backoff.clone();
+                b.truncate(max_len);
+                b
+            },
             // Replay policy - start from beginning or new messages only
             replay_policy: consumer::ReplayPolicy::Instant,
             // Inactive threshold - remove consumer if inactive
